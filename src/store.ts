@@ -1,8 +1,8 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
 import { constants } from 'node:fs'
-import { lstat, mkdir, open, rename, rm, type FileHandle } from 'node:fs/promises'
+import { lstat, mkdir, open, realpath, rename, rm, type FileHandle } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, parse, resolve, sep } from 'node:path'
 import type { OAuthClientInformationMixed, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js'
 
 export interface StoredSession {
@@ -23,6 +23,50 @@ export function sessionFileFor(serverName: string, url: string, patchPath?: stri
   return join(dirname(profilePatch), 'data', `dsh-notion-${serverName}-${digest}.json`)
 }
 
+/** Ensure another local user cannot replace any component of the data path. */
+async function secureDirectory(directory: string, create: boolean): Promise<boolean> {
+  const checked = new Set<string>()
+  const walk = async (value: string, rejectFinalLink: boolean): Promise<boolean> => {
+    const absolute = resolve(value)
+    if (checked.has(absolute)) return true
+    checked.add(absolute)
+    const root = parse(absolute).root
+    const parts = absolute.slice(root.length).split(sep).filter(Boolean)
+    let current = root
+    for (let i = -1; i < parts.length; i++) {
+      if (i >= 0) current = join(current, parts[i]!)
+      let info
+      try { info = await lstat(current) } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        if (!create) return false
+        try { await mkdir(current, { mode: 0o700 }) } catch (mkdirError) {
+          if ((mkdirError as NodeJS.ErrnoException).code !== 'EEXIST') throw mkdirError
+        }
+        info = await lstat(current)
+      }
+      if (info.isSymbolicLink()) {
+        if (rejectFinalLink && i === parts.length - 1) throw new Error(`notion: credential directory must not be a symlink: ${current}`)
+        if (process.platform !== 'win32' && typeof process.geteuid === 'function' && info.uid !== process.geteuid() && info.uid !== 0) {
+          throw new Error(`notion: credential path contains an untrusted symlink: ${current}`)
+        }
+        // The containing directory was verified already; also verify the
+        // resolved target's ancestors so a link cannot bypass those checks.
+        if (!await walk(await realpath(current), false)) return false
+        continue
+      }
+      if (!info.isDirectory()) throw new Error(`notion: credential path must be a directory: ${current}`)
+      if (process.platform !== 'win32' && typeof process.geteuid === 'function') {
+        const uid = process.geteuid()
+        if ((info.uid !== uid && info.uid !== 0) || ((info.mode & 0o022) !== 0 && (info.mode & 0o1000) === 0)) {
+          throw new Error(`notion: credential directory is not protected from other users: ${current}`)
+        }
+      }
+    }
+    return true
+  }
+  return walk(directory, true)
+}
+
 /** Reject symlinks and files that cannot be restricted to the service user. */
 async function secureExistingFile(file: string): Promise<FileHandle | undefined> {
   let info
@@ -40,6 +84,7 @@ async function secureExistingFile(file: string): Promise<FileHandle | undefined>
   try {
     info = await handle.stat()
     if (!info.isFile()) throw new Error(`notion: credential file must be a regular file: ${file}`)
+    if (info.nlink !== 1) throw new Error(`notion: credential file must not have multiple hard links: ${file}`)
     if (process.platform !== 'win32') {
       if (typeof process.geteuid === 'function' && info.uid !== process.geteuid()) {
         throw new Error(`notion: credential file must be owned by the service user: ${file}`)
@@ -65,6 +110,7 @@ export class SessionStore {
 
   async load(): Promise<StoredSession> {
     return this.#serialize(async () => {
+      if (!await secureDirectory(dirname(this.#file), false)) return this.#value = { version: 1 }
       const handle = await secureExistingFile(this.#file)
       if (!handle) return this.#value = { version: 1 }
       let raw: string
@@ -137,8 +183,10 @@ export class SessionStore {
 
   async destroy(): Promise<void> {
     await this.#serialize(async () => {
-      await (await secureExistingFile(this.#file))?.close()
-      await rm(this.#file, { force: true })
+      if (await secureDirectory(dirname(this.#file), false)) {
+        await (await secureExistingFile(this.#file))?.close()
+        await rm(this.#file, { force: true })
+      }
       this.#value = { version: 1 }
       this.#key = undefined
       if (!process.env['DSH_NOTION_ENCRYPTION_KEY']) {
@@ -149,7 +197,7 @@ export class SessionStore {
   }
 
   async #flush(value: StoredSession): Promise<void> {
-    await mkdir(dirname(this.#file), { recursive: true, mode: 0o700 })
+    await secureDirectory(dirname(this.#file), true)
     await (await secureExistingFile(this.#file))?.close()
     const key = await this.#masterKey(true)
     const iv = randomBytes(12)

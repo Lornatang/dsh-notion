@@ -3,7 +3,7 @@ export const MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 
 type LimitExceeded = () => void
 
-function limitStream(body: ReadableStream<Uint8Array>, maxBytes: number, events: boolean, onLimit: LimitExceeded): ReadableStream<Uint8Array> {
+function limitStream(body: ReadableStream<Uint8Array>, maxBytes: number, events: boolean, onLimit: LimitExceeded, onEvent?: () => void): ReadableStream<Uint8Array> {
   let size = 0
   let lineSize = 0
   let lineStartSize = 0
@@ -25,14 +25,14 @@ function limitStream(body: ReadableStream<Uint8Array>, maxBytes: number, events:
           if (++size > maxBytes) { onLimit(); throw new Error('notion: MCP response exceeds the byte limit') }
           if (byte === 13) {
             discardFollowingLF = lineSize === 0 || comment
-            if (lineSize === 0) size = 0
+            if (lineSize === 0) { onEvent?.(); size = 0 }
             else if (comment) size = lineStartSize
             lineSize = 0
             comment = false
             lineStartSize = size
             previousCR = true
           } else if (byte === 10) {
-            if (lineSize === 0) size = 0
+            if (lineSize === 0) { onEvent?.(); size = 0 }
             else if (comment) size = lineStartSize
             lineSize = 0
             comment = false
@@ -78,7 +78,7 @@ function observeEnd(body: ReadableStream<Uint8Array>, onEnd: () => void): Readab
   })
 }
 
-export async function limitResponse(source: Response, maxBytes: number, onLimit: LimitExceeded, onStreamEnd?: () => void): Promise<Response> {
+export async function limitResponse(source: Response, maxBytes: number, onLimit: LimitExceeded, onStreamEnd?: () => void, onEvent?: () => void): Promise<Response> {
   if (!source.body) return source
   // The SDK catches errors from response.text() on some authorization paths.
   // Read error responses here so an oversized body cannot be swallowed there.
@@ -90,7 +90,7 @@ export async function limitResponse(source: Response, maxBytes: number, onLimit:
   }
   const events = source.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() === 'text/event-stream'
   const body = events && onStreamEnd ? observeEnd(source.body, onStreamEnd) : source.body
-  const response = copyResponse(source, limitStream(body, maxBytes, events, onLimit))
+  const response = copyResponse(source, limitStream(body, maxBytes, events, onLimit, onEvent))
   if (events) {
     // OAuth endpoints are parsed as a whole even if they claim to be SSE.
     // Whole-body consumers need a total limit in addition to the event limit.

@@ -3,6 +3,11 @@ import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv
 
 const { schema, value } = workerData as { schema: Parameters<AjvJsonSchemaValidator['getValidator']>[0]; value: unknown }
 try {
+  // The SDK's validator contract is synchronous; AJV returns a Promise for
+  // asynchronous schemas, which that contract would incorrectly treat as true.
+  if (schema && typeof schema === 'object' && '$async' in schema && schema.$async) {
+    throw new Error('asynchronous output schemas are not supported')
+  }
   const result = new AjvJsonSchemaValidator().getValidator(schema)(value)
   parentPort?.postMessage({ valid: result.valid, error: result.valid ? undefined : result.errorMessage.slice(0, 1000) })
 } catch (error) {

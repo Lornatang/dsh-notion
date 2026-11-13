@@ -21,7 +21,7 @@ function secureUrl(url: URL, allowLoopbackHttp: boolean): void {
 }
 
 /** Restrict every discovered OAuth and MCP endpoint, including redirect targets. */
-export function createCloudFetch(serverUrl: URL, options: { maxResponseBytes?: number; onLimit?: () => void; onStreamEnd?: () => void } = {}): { fetch: FetchLike; allowLoopbackHttp: boolean } {
+export function createCloudFetch(serverUrl: URL, options: { maxResponseBytes?: number; onLimit?: () => void; onStreamEnd?: () => void; onEvent?: () => void } = {}): { fetch: FetchLike; allowLoopbackHttp: boolean } {
   const allowLoopbackHttp = serverUrl.protocol === 'http:' && isLoopback(serverUrl)
   secureUrl(serverUrl, allowLoopbackHttp)
   const maxBytes = options.maxResponseBytes ?? MAX_RESPONSE_BYTES
@@ -35,7 +35,7 @@ export function createCloudFetch(serverUrl: URL, options: { maxResponseBytes?: n
       // The SDK performs its own same-origin redirect handling. Never let fetch
       // follow a redirect before its next target has passed the check above.
       const response = await globalThis.fetch(value, { ...init, redirect: init?.redirect === 'error' ? 'error' : 'manual' })
-      return limitResponse(response, maxBytes, options.onLimit ?? (() => undefined), options.onStreamEnd)
+      return limitResponse(response, maxBytes, options.onLimit ?? (() => undefined), options.onStreamEnd, options.onEvent)
     },
   }
 }
@@ -75,11 +75,7 @@ export class CallbackServer {
       server.once('error', failed)
       server.listen(port, '127.0.0.1', () => { server.off('error', failed); resolve((server.address() as AddressInfo).port) })
     })
-    try { this.#port = await bind(preferredPort) }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EADDRINUSE' || preferredPort === 0) throw error
-      this.#port = await bind(0)
-    }
+    this.#port = await bind(preferredPort)
     server.on('error', () => this.cancelWait())
     this.#server = server
     return this.#port

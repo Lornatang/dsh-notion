@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3
+
+- Bound tool discovery, server-initiated requests, stream events, and rapid reconnects.
+- Cancel stalled connection requests promptly and preserve credentials when the callback port is occupied.
+- Protect credential paths against directory substitution and hard links; reject asynchronous output schemas that cannot be validated safely.
+
 ## 0.1.2
 
 - Show the Notion settings interface in English regardless of browser language.

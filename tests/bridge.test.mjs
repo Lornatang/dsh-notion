@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -19,6 +20,78 @@ function makeHost() {
   return { tools, logger, register(definition) { if (tools.has(definition.name)) throw new Error('duplicate tool'); tools.set(definition.name, definition); return () => tools.delete(definition.name) } }
 }
 function options(mock, file) { return { serverName: 'notion', url: mock.url, redirectPort: 0, toolCallTimeoutMs: 5000, authorizationTimeoutMs: 5000, autoOpenBrowser: false, store: new SessionStore(file) } }
+
+test('tool discovery bounds the aggregate size of pages and cursors', async () => {
+  const large = 'x'.repeat(4 * 1024 * 1024 + 1024)
+  const definition = (name) => ({ name, description: large, inputSchema: { type: 'object' } })
+  const cases = [
+    { toolPages: [[definition('first')], [definition('second')]] },
+    { toolPages: [[], []], pageCursors: ['x'.repeat(8 * 1024 * 1024 + 1)] },
+  ]
+  for (const config of cases) {
+    const mock = await startMockMcp(config)
+    const root = await mkdtemp(join(tmpdir(), 'notion-discovery-budget-'))
+    const host = makeHost()
+    const bridge = new NotionBridge(host, options(mock, join(root, 'session.json')))
+    try {
+      await bridge.start()
+      await waitFor(() => bridge.snapshot().status === 'error')
+      assert.match(bridge.snapshot().error, /discovery exceeds the byte limit/)
+      assert.equal(host.tools.size, 0)
+    } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
+  }
+})
+
+for (const stalled of ['initialize', 'tools/list']) {
+  test(`disconnect cancels a stalled ${stalled} SSE request`, async () => {
+    const mock = await startMockMcp({ stallOn: stalled })
+    const root = await mkdtemp(join(tmpdir(), 'notion-stalled-'))
+    const file = join(root, 'session.json')
+    const bridge = new NotionBridge(makeHost(), options(mock, file))
+    try {
+      const starting = bridge.start()
+      await waitFor(() => mock.calls.some((call) => call.method === stalled))
+      await Promise.race([bridge.disconnect(), delay(1000).then(() => { throw new Error('disconnect was not cancelled') })])
+      await starting
+      await assert.rejects(stat(file), { code: 'ENOENT' })
+    } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
+  })
+}
+
+test('server-initiated request floods and reconnect storms terminate the connection', async () => {
+  for (const streamMode of ['flood', 'reconnect', 'events']) {
+    const mock = await startMockMcp({ streamMode })
+    const root = await mkdtemp(join(tmpdir(), 'notion-stream-budget-'))
+    const bridge = new NotionBridge(makeHost(), options(mock, join(root, 'session.json')))
+    try {
+      await bridge.start()
+      await waitFor(() => bridge.snapshot().status === 'error')
+      const expected = streamMode === 'flood' ? /too many concurrent requests/ : streamMode === 'reconnect' ? /reopened the event stream too frequently/ : /sent too many events/
+      assert.match(bridge.snapshot().error, expected)
+      if (streamMode === 'reconnect') assert.ok(mock.streams() <= 8)
+    } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
+  }
+})
+
+test('a busy configured callback port preserves existing credentials', async () => {
+  const blocker = createServer()
+  await new Promise((resolve) => blocker.listen(0, '127.0.0.1', resolve))
+  const port = blocker.address().port
+  const mock = await startMockMcp()
+  const root = await mkdtemp(join(tmpdir(), 'notion-port-busy-'))
+  const file = join(root, 'session.json')
+  const store = new SessionStore(file)
+  const bridge = new NotionBridge(makeHost(), { ...options(mock, file), store, redirectPort: port })
+  try {
+    await store.patch({ redirectUri: `http://127.0.0.1:${port}/callback`, tokens: { access_token: 'saved', token_type: 'Bearer' } })
+    const before = await readFile(file, 'utf8')
+    await assert.rejects(bridge.start(), { code: 'EADDRINUSE' })
+    assert.equal(await readFile(file, 'utf8'), before)
+    assert.equal((await new SessionStore(file).load()).tokens.access_token, 'saved')
+  } finally {
+    await bridge.dispose(); await mock.close(); await new Promise((resolve) => blocker.close(resolve)); await rm(root, { recursive: true, force: true })
+  }
+})
 
 test('registers Notion tools and MCP resources, then removes all on disconnect', async () => {
   const mock = await startMockMcp()

@@ -65,10 +65,11 @@ plaintext credential storage. Run only one DSH process per profile.
 
 The callback listener binds only to `127.0.0.1` on the DSH host. For a remote
 host, forward the callback port to the browser's machine. Keep the configured
-port available and stable: if it is in use the plugin chooses a free port,
-which can require a new authorization. The server and discovered OAuth
-endpoints must use the same HTTPS origin. HTTP is accepted only for a loopback
-server.
+port available and stable: if it is in use the connection fails without
+removing stored credentials. Setting the port to `0` chooses a free port and
+can require a new authorization after a restart. The server and discovered
+OAuth endpoints must use the same HTTPS origin. HTTP is accepted only for a
+loopback server.
 
 **Disconnect** removes locally stored credentials and registered tools. It does
 not revoke a Notion grant; revoke it separately in Notion's connection settings.
@@ -80,8 +81,12 @@ MCP and OAuth responses are limited to 16 MiB after decompression; streaming
 responses use the same limit per event. Structured tool output is validated in
 an isolated worker with a maximum five-second budget (or the configured tool
 timeout, whichever is shorter). Oversized responses and validation timeouts
-fail instead of blocking DSH; narrow a request if a legitimate result exceeds
-the limit.
+fail instead of blocking DSH; tool discovery has an 8 MiB aggregate limit, and
+excessive stream events, concurrent server requests, or rapid reconnections
+close the connection. Narrow a request or reconnect if a legitimate workload
+exceeds these limits. On POSIX, credential path directories must be protected
+from modification by other users, and the data directory must not be a symlink.
+Windows profile directory access must be restricted with ACLs.
 
 ## Configuration
 

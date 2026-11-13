@@ -13,6 +13,12 @@ import { openInBrowser } from './open-url.js'
 import type { SessionStore } from './store.js'
 import { deferredOutputValidation, validateOutput } from './output-validator.js'
 
+const MAX_DISCOVERY_BYTES = 8 * 1024 * 1024
+const MAX_SERVER_RESPONSES = 32
+const RATE_WINDOW_MS = 10_000
+const MAX_SSE_EVENTS_PER_WINDOW = 1000
+const MAX_SSE_OPENS_PER_WINDOW = 8
+
 export interface BridgeHost { register(definition: ToolDefinition): () => void; logger: Logger }
 export interface BridgeOptions {
   serverName: string; url: string; redirectPort: number; toolCallTimeoutMs: number
@@ -164,12 +170,27 @@ export class NotionBridge {
     const serverUrl = new URL(this.#options.url)
     const allowLoopbackHttp = createCloudFetch(serverUrl).allowLoopbackHttp
     let flight: { owner: OperationContext; done: Promise<void> } | undefined
+    const eventTimes: number[] = []
+    const sseOpenTimes: number[] = []
+    const rateLimit = (times: number[], maximum: number, message: string): void => {
+      const now = Date.now()
+      while (times.length && now - times[0]! >= RATE_WINDOW_MS) times.shift()
+      if (times.length >= maximum) {
+        const error = new Error(message)
+        this.#breakGeneration(generation, error)
+        throw error
+      }
+      times.push(now)
+    }
     const fetch: FetchLike = async (value, init) => {
       const signals = [signal, AbortSignal.timeout(this.#options.toolCallTimeoutMs)]
       if (init?.signal) signals.push(init.signal)
       const combined = AbortSignal.any(signals)
       const operation = this.#operation.getStore()
       const accept = new Headers(init?.headers).get('accept') ?? ''
+      if (init?.method?.toUpperCase() === 'GET' && accept.includes('text/event-stream')) {
+        rateLimit(sseOpenTimes, MAX_SSE_OPENS_PER_WINDOW, 'MCP server reopened the event stream too frequently')
+      }
       if (operation && accept.includes('text/event-stream')) {
         const authorization = new Headers(init?.headers).get('authorization')
         const tokens = this.#options.store.current.tokens
@@ -179,6 +200,7 @@ export class NotionBridge {
       }
       const network = createCloudFetch(serverUrl, {
         onLimit: () => this.#breakGeneration(generation, new Error('MCP response exceeds the byte limit')),
+        onEvent: () => rateLimit(eventTimes, MAX_SSE_EVENTS_PER_WINDOW, 'MCP server sent too many events'),
         onStreamEnd: () => {
           if (operation && init?.method?.toUpperCase() === 'POST' && accept.includes('text/event-stream') && !combined.aborted) operation.responseStreamEnded = true
         },
@@ -223,11 +245,23 @@ export class NotionBridge {
       check()
       this.#status = 'connecting'
       this.#error = undefined
-      const client = new Client({ name: 'dsh-notion', version: '0.1.1' }, { jsonSchemaValidator: deferredOutputValidation })
+      const client = new Client({ name: 'dsh-notion', version: '0.1.3' }, { jsonSchemaValidator: deferredOutputValidation })
       client.onclose = () => { if (this.#client === client) this.#breakGeneration(generation, new Error('MCP connection closed')) }
       client.onerror = (error) => { if (this.#client === client && this.#status === 'ready' && this.#isConnectionFailure(error)) this.#breakGeneration(generation, error) }
       const transport = new StreamableHTTPClientTransport(new URL(this.#options.url), { authProvider: provider, fetch })
-      try { await client.connect(transport); check() }
+      const send = transport.send.bind(transport)
+      let pendingResponses = 0
+      transport.send = async (message, options) => {
+        if (!('id' in message) || 'method' in message) return send(message, options)
+        if (pendingResponses >= MAX_SERVER_RESPONSES) {
+          const error = new Error('MCP server sent too many concurrent requests')
+          this.#breakGeneration(generation, error)
+          throw error
+        }
+        pendingResponses++
+        try { await send(message, options) } finally { pendingResponses-- }
+      }
+      try { await client.connect(transport, { signal, timeout: this.#options.toolCallTimeoutMs }); check() }
       catch (error) {
         await transport.close().catch(() => undefined)
         check()
@@ -257,11 +291,14 @@ export class NotionBridge {
     const found: Array<{ name: string; description?: string; inputSchema: unknown; outputSchema?: unknown }> = []
     const seen = new Set<string>()
     let cursor: string | undefined
+    let discoveryBytes = 0
     do {
       if (seen.size >= 100) throw new Error('MCP server returned too many tool pages')
-      const page = await client.listTools(cursor ? { cursor } : {})
+      const page = await client.listTools(cursor ? { cursor } : {}, { signal, timeout: this.#options.toolCallTimeoutMs })
+      discoveryBytes += Buffer.byteLength(JSON.stringify(page), 'utf8')
+      if (discoveryBytes > MAX_DISCOVERY_BYTES) throw new Error('MCP tool discovery exceeds the byte limit')
+      if (found.length + page.tools.length > 1000) throw new Error('MCP server returned too many tools')
       found.push(...page.tools)
-      if (found.length > 1000) throw new Error('MCP server returned too many tools')
       cursor = page.nextCursor
       if (cursor && seen.has(cursor)) throw new Error('MCP server repeated a continuation cursor')
       if (cursor) seen.add(cursor)

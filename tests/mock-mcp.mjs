@@ -1,7 +1,7 @@
 import { createServer } from 'node:http'
 import { createHash } from 'node:crypto'
 
-export async function startMockMcp({ initializeDelay = 0, oauth = false, tokenEndpoint, conflict = false, toolPages, toolResult, rotateRefresh = false, refreshDelay = 0, toolDelay = 0, oversizedDiscovery = false } = {}) {
+export async function startMockMcp({ initializeDelay = 0, oauth = false, tokenEndpoint, conflict = false, toolPages, pageCursors, toolResult, rotateRefresh = false, refreshDelay = 0, toolDelay = 0, oversizedDiscovery = false, stallOn, streamMode } = {}) {
   const calls = []
   const requests = []
   let origin
@@ -13,6 +13,7 @@ export async function startMockMcp({ initializeDelay = 0, oauth = false, tokenEn
   let brokenStream = false
   let delaySecondDiscovery = false
   let discoveries = 0
+  let streams = 0
   const definitions = [
     { name: 'notion-search', description: 'Search pages', inputSchema: { type: 'object', properties: { query: { type: 'string' } } } },
     { name: 'notion-create-pages', description: 'Create Notion pages', inputSchema: { type: 'object', properties: { title: { type: 'string' } } } },
@@ -61,6 +62,19 @@ export async function startMockMcp({ initializeDelay = 0, oauth = false, tokenEn
     if (oauth && path === '/mcp' && req.headers.authorization !== `Bearer ${accessToken}`) {
       res.writeHead(401, { 'www-authenticate': `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp"` }).end(); return
     }
+    if (path === '/mcp' && req.method === 'GET' && streamMode) {
+      streams++
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      if (streamMode === 'reconnect') { res.end('retry: 0\n\n'); return }
+      if (streamMode === 'flood') {
+        for (let i = 0; i < 80; i++) res.write(`data: ${JSON.stringify({ jsonrpc: '2.0', id: `server-${i}`, method: 'ping' })}\n\n`)
+        return
+      }
+      if (streamMode === 'events') {
+        res.write('data: {"jsonrpc":"2.0","method":"notifications/test"}\n\n'.repeat(1100))
+        return
+      }
+    }
     if (req.method === 'DELETE') { res.writeHead(204).end(); return }
     if (req.method !== 'POST') { res.writeHead(405).end(); return }
     const chunks = []
@@ -68,15 +82,21 @@ export async function startMockMcp({ initializeDelay = 0, oauth = false, tokenEn
     let message
     try { message = JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { res.writeHead(400).end(); return }
     calls.push(message)
+    if (streamMode === 'flood' && message.id !== undefined && message.method === undefined) return
     if (message.id === undefined) { res.writeHead(202).end(); return }
     let result
+    if (message.method === stallOn) {
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.write(': waiting\n\n')
+      return
+    }
     if (message.method === 'initialize') {
       if (initializeDelay) await new Promise((resolve) => setTimeout(resolve, initializeDelay))
       result = { protocolVersion: message.params.protocolVersion, capabilities: { tools: {}, resources: {} }, serverInfo: { name: 'notion-mock', version: '1' } }
     } else if (message.method === 'tools/list') {
-      const page = Number(message.params?.cursor || 0)
+      const page = pageCursors && message.params?.cursor ? pageCursors.indexOf(message.params.cursor) + 1 : Number(message.params?.cursor || 0)
       const pages = toolPages || [definitions]
-      result = { tools: pages[page], ...(page + 1 < pages.length ? { nextCursor: String(page + 1) } : {}) }
+      result = { tools: pages[page], ...(page + 1 < pages.length ? { nextCursor: pageCursors?.[page] ?? String(page + 1) } : {}) }
     }
     else if (message.method === 'tools/call') {
       if (toolDelay && message.params.arguments?.query === 'slow') await new Promise((resolve) => setTimeout(resolve, toolDelay))
@@ -97,5 +117,5 @@ export async function startMockMcp({ initializeDelay = 0, oauth = false, tokenEn
   })
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   origin = `http://127.0.0.1:${server.address().port}`
-  return { url: `${origin}/mcp`, calls, requests, expire: (value = 'refreshed-access-token') => { accessToken = value }, delaySecondDiscovery: () => { delaySecondDiscovery = true; discoveries = 0 }, setUnavailable: (value) => { unavailable = value }, setBrokenStream: (value) => { brokenStream = value }, refreshes: () => refreshes, close: () => new Promise((resolve) => { server.closeAllConnections(); server.close(resolve) }) }
+  return { url: `${origin}/mcp`, calls, requests, streams: () => streams, expire: (value = 'refreshed-access-token') => { accessToken = value }, delaySecondDiscovery: () => { delaySecondDiscovery = true; discoveries = 0 }, setUnavailable: (value) => { unavailable = value }, setBrokenStream: (value) => { brokenStream = value }, refreshes: () => refreshes, close: () => new Promise((resolve) => { server.closeAllConnections(); server.close(resolve) }) }
 }

@@ -16,6 +16,7 @@ export declare function createCloudFetch(serverUrl: URL, options?: {
     maxResponseBytes?: number;
     onLimit?: () => void;
     onStreamEnd?: () => void;
+    onEvent?: () => void;
 }): {
     fetch: FetchLike;
     allowLoopbackHttp: boolean;

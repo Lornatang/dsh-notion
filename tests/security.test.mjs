@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { execFile } from 'node:child_process'
-import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { chmod, link, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -75,6 +75,35 @@ test('credentials are encrypted, profile-isolated, owner-only, and reject tamper
     await symlink(target, file)
     await assert.rejects(new SessionStore(file).load(), /regular file/)
     assert.equal(await readFile(target, 'utf8'), 'do not modify')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('credential storage rejects substituted directories and hard-linked files', { skip: process.platform === 'win32' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'notion-store-links-'))
+  try {
+    const a = sessionFileFor('notion', 'https://example.test/mcp', join(root, 'a', 'cordis.patch.yml'))
+    const b = sessionFileFor('notion', 'https://example.test/mcp', join(root, 'b', 'cordis.patch.yml'))
+    const first = new SessionStore(a)
+    await first.patch({ tokens: { access_token: 'a', token_type: 'Bearer' } })
+    await new SessionStore(b).patch({ tokens: { access_token: 'b', token_type: 'Bearer' } })
+    const original = await readFile(b, 'utf8')
+    await rm(join(root, 'a', 'data'), { recursive: true })
+    await symlink(join(root, 'b', 'data'), join(root, 'a', 'data'))
+    await assert.rejects(first.destroy(), /directory must not be a symlink/)
+    await assert.rejects(first.patch({ codeVerifier: 'replacement' }), /directory must not be a symlink/)
+    assert.equal(await readFile(b, 'utf8'), original)
+
+    const victim = join(root, 'victim')
+    const planted = join(root, 'hardlinked-session')
+    await writeFile(victim, 'do not chmod', { mode: 0o644 })
+    await chmod(victim, 0o644)
+    await link(victim, planted)
+    await assert.rejects(new SessionStore(planted).load(), /multiple hard links/)
+    assert.equal((await stat(victim)).mode & 0o777, 0o644)
+
+    await mkdir(join(root, 'unsafe'), { mode: 0o700 })
+    await chmod(join(root, 'unsafe'), 0o777)
+    await assert.rejects(new SessionStore(join(root, 'unsafe', 'session')).patch({ codeVerifier: 'x' }), /not protected from other users/)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
@@ -177,6 +206,7 @@ test('structured output validation retains normal schema and format checks', asy
   await validateOutput(schema, { email: 'person@example.com', code: 'AB' }, 5000)
   await assert.rejects(validateOutput(schema, { email: 'not-an-email', code: 'AB' }, 5000), /does not match/)
   await assert.rejects(validateOutput(schema, { email: 'person@example.com', code: 'bad' }, 5000), /does not match/)
+  await assert.rejects(validateOutput({ $async: true, type: 'object', required: ['missing'] }, {}, 5000), /asynchronous output schemas are not supported/)
 })
 
 test('pathological output regexes cannot block the host event loop', async () => {
