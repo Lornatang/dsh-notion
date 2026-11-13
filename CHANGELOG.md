@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2
+
+- Show the Notion settings interface in English regardless of browser language.
+- Keep the README focused on installation and everyday use.
+
 ## 0.1.1
 
 - Serialize authorization and recover from broken connections and host service changes.

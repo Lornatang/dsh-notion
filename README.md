@@ -1,7 +1,5 @@
 # dsh-notion
 
-[简体中文](README.zh-CN.md)
-
 Connect Notion's official MCP server to DeepSeek Harness (DSH). The plugin
 registers Notion's available tools in agent sessions and adds a Notion
 connection page to DSH Desktop and Web. Ask an agent to search or work with pages,
@@ -22,26 +20,6 @@ For the default Web profile, replace `desktop` with `web`; use your profile's
 name if it differs. Restart DSH, or start Web with `dsh web --no-open`. Use the
 same command to update the package and restart DSH; profile settings and
 credentials are retained.
-
-To install a specific repository revision instead of the npm package:
-
-```bash
-revision=$(git ls-remote https://github.com/Lornatang/dsh-notion.git refs/heads/main | cut -f1)
-dsh plugin --profile desktop add "https://github.com/Lornatang/dsh-notion/archive/${revision}.tar.gz"
-```
-
-Use a commit ID or release tag rather than a mutable branch archive when
-updating, because the package manager can cache archive URLs. To build and
-install a local package instead:
-
-```bash
-git clone https://github.com/Lornatang/dsh-notion.git
-cd dsh-notion
-npm ci
-npm run build
-npm pack --ignore-scripts
-dsh plugin --profile desktop add "$PWD/lornatang-dsh-notion-0.1.1.tgz"
-```
 
 ## Connect
 
@@ -90,7 +68,7 @@ host, forward the callback port to the browser's machine. Keep the configured
 port available and stable: if it is in use the plugin chooses a free port,
 which can require a new authorization. The server and discovered OAuth
 endpoints must use the same HTTPS origin. HTTP is accepted only for a loopback
-mock server used in development.
+server.
 
 **Disconnect** removes locally stored credentials and registered tools. It does
 not revoke a Notion grant; revoke it separately in Notion's connection settings.
@@ -157,20 +135,6 @@ Use `web` or your custom profile name as appropriate, then restart DSH.
 Disconnecting locally does not revoke the Notion grant; manage that separately
 in Notion. If already uninstalled, stop DSH before removing the corresponding
 `data/dsh-notion-*.json` file from the affected profile.
-
-## Development
-
-```bash
-npm ci
-npm run typecheck
-npm test
-npm run test:dsh
-```
-
-`test:dsh` installs the package into a temporary DSH Web profile and exercises
-OAuth against a local mock. It requires DSH 0.2.2-rc.2 and `pnpm` on `PATH`.
-A browser check is run when Chrome is available, and is required in CI. These
-tests do not read or modify a real Notion workspace.
 
 References: [Notion MCP client integration](https://github.com/makenotion/notion-cookbook/blob/main/docs/mcp-client-integration.md),
 [Notion MCP permissions](https://www.notion.com/help/notion-mcp).

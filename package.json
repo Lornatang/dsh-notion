@@ -1,6 +1,6 @@
 {
   "name": "@lornatang/dsh-notion",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Connect Notion's official MCP server to DeepSeek Harness agent sessions.",
   "type": "module",
   "license": "Apache-2.0",
@@ -34,7 +34,6 @@
     "lib",
     "cordis.patch.yml",
     "README.md",
-    "README.zh-CN.md",
     "CHANGELOG.md",
     "LICENSE",
     "NOTICE"

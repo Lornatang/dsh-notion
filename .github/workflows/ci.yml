@@ -39,3 +39,4 @@ jobs:
         env:
           DSH_TEST_BINARY: ${{ runner.temp }}/notion-dsh/node_modules/.bin/dsh
           CHROME_PATH: /usr/bin/google-chrome
+          DSH_TEST_LANGUAGE: zh-CN

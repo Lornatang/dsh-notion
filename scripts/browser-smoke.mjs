@@ -39,6 +39,10 @@ export async function verifyBrowser(launchUrl, temp) {
       return result.result.value
     }
     await send('Page.enable')
+    if (process.env.DSH_TEST_LANGUAGE) {
+      const version = await send('Browser.getVersion')
+      await send('Network.setUserAgentOverride', { userAgent: version.userAgent, acceptLanguage: process.env.DSH_TEST_LANGUAGE })
+    }
     await send('Page.navigate', { url: launchUrl })
     let opened = false
     for (let i = 0; i < 300; i++) {
@@ -78,6 +82,14 @@ export async function verifyBrowser(launchUrl, temp) {
       await delay(100)
     }
     assert.ok(ready, 'Notion authorization UI did not render')
+    const panel = await evaluate(`document.querySelector('[data-dsh-notion-settings]').innerText`)
+    assert.ok(panel.includes('Waiting for Notion authorization'), 'Notion status must be in English')
+    assert.ok(panel.includes('Authorize in Notion'), 'Notion action must be in English')
+    assert.doesNotMatch(panel, /[\u3400-\u9fff]/u, 'Notion settings must be in English')
+    if (process.env.DSH_TEST_LANGUAGE) {
+      const language = await evaluate('navigator.language')
+      assert.ok(language.toLowerCase().startsWith(process.env.DSH_TEST_LANGUAGE.toLowerCase()), 'browser language override must apply')
+    }
     console.log('Chrome: Notion settings and authorization link rendered.')
   } finally { socket?.close(); await chrome.close() }
 }
