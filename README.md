@@ -13,6 +13,16 @@ This is a community project, not a Notion or DeepSeek product.
 ## Install from GitHub
 
 ```bash
+dsh plugin --profile web add https://github.com/Lornatang/dsh-notion/archive/refs/heads/main.tar.gz
+```
+
+Restart DSH, or start the Web profile with `dsh web --no-open`. Replace `web`
+with the name of your profile if necessary. Run the install command again and
+restart DSH to update. The URL tracks the repository's `main` branch.
+
+To build and install a local package instead:
+
+```bash
 git clone https://github.com/Lornatang/dsh-notion.git
 cd dsh-notion
 npm ci
@@ -20,10 +30,6 @@ npm run build
 npm pack --ignore-scripts
 dsh plugin --profile web add "$PWD/lornatang-dsh-notion-0.1.0.tgz"
 ```
-
-Restart DSH, or start the Web profile with `dsh web --no-open`. Replace `web`
-with the name of your profile if necessary. Updating requires rebuilding the
-new version, adding its tarball with the same command, and restarting DSH.
 
 ## Connect
 

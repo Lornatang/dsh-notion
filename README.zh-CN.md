@@ -12,6 +12,15 @@ Notion 连接设置，并向智能体会话注册 Notion 提供的工具，可�
 ## 安装
 
 ```bash
+dsh plugin --profile web add https://github.com/Lornatang/dsh-notion/archive/refs/heads/main.tar.gz
+```
+
+重启 DSH，或使用 `dsh web --no-open` 启动 Web 配置。如果配置名称不是 `web`，
+请替换命令中的配置名称。更新时再次执行安装命令并重启；该地址跟随仓库的 `main` 分支。
+
+也可以从源码构建并安装本地压缩包：
+
+```bash
 git clone https://github.com/Lornatang/dsh-notion.git
 cd dsh-notion
 npm ci
@@ -19,9 +28,6 @@ npm run build
 npm pack --ignore-scripts
 dsh plugin --profile web add "$PWD/lornatang-dsh-notion-0.1.0.tgz"
 ```
-
-重启 DSH，或使用 `dsh web --no-open` 启动 Web 配置。如果配置名称不是 `web`，
-请替换安装命令中的配置名称。更新时重新构建新版本并安装对应的压缩包，然后重启。
 
 ## 连接
 
