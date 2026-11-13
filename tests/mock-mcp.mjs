@@ -1,7 +1,7 @@
 import { createServer } from 'node:http'
 import { createHash } from 'node:crypto'
 
-export async function startMockMcp({ initializeDelay = 0, oauth = false, tokenEndpoint, conflict = false, toolPages, pageCursors, toolResult, rotateRefresh = false, refreshDelay = 0, toolDelay = 0, oversizedDiscovery = false, stallOn, streamMode } = {}) {
+export async function startMockMcp({ initializeDelay = 0, oauth = false, tokenEndpoint, conflict = false, toolPages, pageCursors, toolResult, rotateRefresh = false, refreshDelay = 0, holdSlowTool = false, oversizedDiscovery = false, stallOn, streamMode } = {}) {
   const calls = []
   const requests = []
   let origin
@@ -14,6 +14,8 @@ export async function startMockMcp({ initializeDelay = 0, oauth = false, tokenEn
   let delaySecondDiscovery = false
   let discoveries = 0
   let streams = 0
+  let releaseSlowTool
+  const slowToolGate = new Promise((resolve) => { releaseSlowTool = resolve })
   const definitions = [
     { name: 'notion-search', description: 'Search pages', inputSchema: { type: 'object', properties: { query: { type: 'string' } } } },
     { name: 'notion-create-pages', description: 'Create Notion pages', inputSchema: { type: 'object', properties: { title: { type: 'string' } } } },
@@ -99,7 +101,7 @@ export async function startMockMcp({ initializeDelay = 0, oauth = false, tokenEn
       result = { tools: pages[page], ...(page + 1 < pages.length ? { nextCursor: pageCursors?.[page] ?? String(page + 1) } : {}) }
     }
     else if (message.method === 'tools/call') {
-      if (toolDelay && message.params.arguments?.query === 'slow') await new Promise((resolve) => setTimeout(resolve, toolDelay))
+      if (holdSlowTool && message.params.arguments?.query === 'slow') await slowToolGate
       if (brokenStream) {
         res.writeHead(200, { 'content-type': 'text/event-stream' })
         res.write('data: {"jsonrpc":"2.0"')
@@ -117,5 +119,5 @@ export async function startMockMcp({ initializeDelay = 0, oauth = false, tokenEn
   })
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   origin = `http://127.0.0.1:${server.address().port}`
-  return { url: `${origin}/mcp`, calls, requests, streams: () => streams, expire: (value = 'refreshed-access-token') => { accessToken = value }, delaySecondDiscovery: () => { delaySecondDiscovery = true; discoveries = 0 }, setUnavailable: (value) => { unavailable = value }, setBrokenStream: (value) => { brokenStream = value }, refreshes: () => refreshes, close: () => new Promise((resolve) => { server.closeAllConnections(); server.close(resolve) }) }
+  return { url: `${origin}/mcp`, calls, requests, streams: () => streams, expire: (value = 'refreshed-access-token') => { accessToken = value }, delaySecondDiscovery: () => { delaySecondDiscovery = true; discoveries = 0 }, setUnavailable: (value) => { unavailable = value }, setBrokenStream: (value) => { brokenStream = value }, refreshes: () => refreshes, close: () => new Promise((resolve) => { releaseSlowTool(); server.closeAllConnections(); server.close(resolve) }) }
 }

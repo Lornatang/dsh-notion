@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.4
+
+- Allow any DSH version in the package metadata and run integration checks against the selected host.
+- Make the slow-tool timeout test use a controlled response instead of a short timing race.
+
 ## 0.1.3
 
 - Bound tool discovery, server-initiated requests, stream events, and rapid reconnects.

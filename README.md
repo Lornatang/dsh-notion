@@ -5,7 +5,7 @@ registers Notion's available tools in agent sessions and adds a Notion
 connection page to DSH Desktop and Web. Ask an agent to search or work with pages,
 databases, and other content supported by your Notion account.
 
-**Requires:** Node.js 22.19+, DSH 0.2.2-rc.2+, and a Web-compatible profile.
+**Requires:** Node.js 22.19+ and a DSH Web-compatible profile.
 This is a community project, not a Notion or DeepSeek product.
 
 ## Install

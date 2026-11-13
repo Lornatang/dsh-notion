@@ -282,15 +282,16 @@ test('a broken tool response stream eventually exposes a reconnect path', async 
 })
 
 test('a slow tool timeout does not break other tools or the connection', async () => {
-  const mock = await startMockMcp({ toolDelay: 900 })
+  const mock = await startMockMcp({ holdSlowTool: true })
   const root = await mkdtemp(join(tmpdir(), 'notion-slow-tool-'))
   const host = makeHost()
-  const bridge = new NotionBridge(host, { ...options(mock, join(root, 'session.json')), toolCallTimeoutMs: 300 })
+  const bridge = new NotionBridge(host, options(mock, join(root, 'session.json')))
   try {
     await bridge.start()
     await waitFor(() => bridge.snapshot().status === 'ready')
     const search = host.tools.get('mcp__notion__notion-search')
     const slow = assert.rejects(search.execute({ query: 'slow' }, {}), /timed out/i)
+    await waitFor(() => mock.calls.some((call) => call.method === 'tools/call' && call.params.arguments?.query === 'slow'))
     assert.match((await search.execute({ query: 'fast' }, {})).content[0].text, /Mock Notion page/)
     await slow
     assert.equal(bridge.snapshot().status, 'ready')

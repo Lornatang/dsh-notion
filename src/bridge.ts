@@ -245,7 +245,7 @@ export class NotionBridge {
       check()
       this.#status = 'connecting'
       this.#error = undefined
-      const client = new Client({ name: 'dsh-notion', version: '0.1.3' }, { jsonSchemaValidator: deferredOutputValidation })
+      const client = new Client({ name: 'dsh-notion', version: '0.1.4' }, { jsonSchemaValidator: deferredOutputValidation })
       client.onclose = () => { if (this.#client === client) this.#breakGeneration(generation, new Error('MCP connection closed')) }
       client.onerror = (error) => { if (this.#client === client && this.#status === 'ready' && this.#isConnectionFailure(error)) this.#breakGeneration(generation, error) }
       const transport = new StreamableHTTPClientTransport(new URL(this.#options.url), { authProvider: provider, fetch })

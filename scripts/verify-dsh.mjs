@@ -24,7 +24,7 @@ let output = ''
 try {
   await mkdir(home, { recursive: true })
   const version = (await run(dsh, ['--version'], { env, timeout: 30000 })).stdout.trim()
-  assert.equal(version, '0.2.2-rc.2', 'this integration test targets DSH 0.2.2-rc.2')
+  assert.ok(version, 'DSH did not report its version')
   await run(dsh, ['--profile', 'notion-test', '--from-default-profile', 'web', '--dump-config'], { env, cwd: temp, timeout: 60000, maxBuffer: 1024 * 1024 })
   const profile = join(dshHome, 'profiles', 'notion-test')
   const packed = JSON.parse((await run('npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', temp], { cwd: root, env, timeout: 30000 })).stdout)[0]
@@ -74,7 +74,7 @@ try {
   const disconnected = await fetch(origin + '/plugins/notion/disconnect', { method: 'POST', headers: { cookie, origin } })
   assert.equal(disconnected.status, 200)
   assert.equal((await disconnected.json()).toolCount, 0)
-  console.log('DSH 0.2.2-rc.2: installation, request fence, mock OAuth, tools and encrypted credentials passed.')
+  console.log(`DSH ${version}: installation, request fence, mock OAuth, tools and encrypted credentials passed.`)
 } catch (error) {
   const diagnostics = output.split('\n').filter((line) => /notion|warning|error/i.test(line) && !/token|https?:\/\//i.test(line)).slice(-20)
   if (diagnostics.length) process.stderr.write(diagnostics.join('\n') + '\n')
