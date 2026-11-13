@@ -1,0 +1,8 @@
+- insert:
+    - id: notion
+      name: '@lornatang/dsh-notion'
+      config:
+        serverName: notion
+        url: 'https://mcp.notion.com/mcp'
+        redirectPort: 3335
+        autoOpenBrowser: false

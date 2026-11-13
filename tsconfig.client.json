@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "types": [],
+    "rootDir": "src/client",
+    "outDir": "lib/client-build",
+    "declaration": true,
+    "declarationDir": "lib/types/client",
+    "sourceMap": false
+  },
+  "include": ["src/client"],
+  "exclude": []
+}
