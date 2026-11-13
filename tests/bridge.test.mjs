@@ -126,3 +126,238 @@ test('rejects an insecure discovered OAuth token endpoint', async () => {
     assert.equal((await new SessionStore(file).load()).tokens, undefined)
   } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
 })
+
+test('oversized discovery cannot fall back to another authorization path', async () => {
+  const mock = await startMockMcp({ oauth: true, oversizedDiscovery: true })
+  const root = await mkdtemp(join(tmpdir(), 'notion-large-discovery-'))
+  const file = join(root, 'session.json')
+  const host = makeHost()
+  const bridge = new NotionBridge(host, options(mock, file))
+  try {
+    await bridge.start()
+    await waitFor(() => bridge.snapshot().status === 'error')
+    assert.match(bridge.snapshot().error, /byte limit/)
+    await delay(100)
+    assert.ok(!mock.requests.includes('/register'))
+    assert.ok(!mock.requests.includes('/token'))
+    assert.equal((await new SessionStore(file).load()).tokens, undefined)
+    assert.equal(host.tools.size, 0)
+  } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('concurrent authorization requests share one OAuth flow', async () => {
+  const mock = await startMockMcp({ oauth: true })
+  const root = await mkdtemp(join(tmpdir(), 'notion-concurrent-'))
+  const host = makeHost()
+  const bridge = new NotionBridge(host, options(mock, join(root, 'session.json')))
+  try {
+    await bridge.start()
+    await waitFor(() => bridge.snapshot().status === 'authorizing')
+    await bridge.disconnect()
+    const attempts = await Promise.all(Array.from({ length: 4 }, () => bridge.authorize()))
+    assert.ok(attempts.every((snapshot) => snapshot.status === 'authorizing'))
+    const authorization = bridge.snapshot().authorizationUrl
+    assert.ok(authorization)
+    assert.equal((await fetch(authorization)).status, 200)
+    await waitFor(() => bridge.snapshot().status === 'ready')
+    assert.equal(host.tools.size, 5)
+  } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('connection failure clears stale tools and permits reconnect without deleting credentials', async () => {
+  const mock = await startMockMcp({ oauth: true })
+  const root = await mkdtemp(join(tmpdir(), 'notion-reconnect-'))
+  const file = join(root, 'session.json')
+  const host = makeHost()
+  const bridge = new NotionBridge(host, options(mock, file))
+  try {
+    await bridge.start()
+    await waitFor(() => bridge.snapshot().status === 'authorizing')
+    await fetch(bridge.snapshot().authorizationUrl)
+    await waitFor(() => bridge.snapshot().status === 'ready')
+    mock.setUnavailable(true)
+    await assert.rejects(host.tools.get('mcp__notion__notion-search').execute({ query: 'plans' }, {}))
+    await waitFor(() => bridge.snapshot().status === 'error')
+    assert.equal(host.tools.size, 0)
+    assert.ok((await new SessionStore(file).load()).tokens)
+    mock.setUnavailable(false)
+    await bridge.authorize()
+    await waitFor(() => bridge.snapshot().status === 'ready')
+    assert.equal(host.tools.size, 5)
+    assert.match((await host.tools.get('mcp__notion__notion-search').execute({ query: 'plans' }, {})).content[0].text, /Mock Notion page/)
+  } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('a broken tool response stream eventually exposes a reconnect path', async () => {
+  const mock = await startMockMcp()
+  const root = await mkdtemp(join(tmpdir(), 'notion-stream-reconnect-'))
+  const host = makeHost()
+  const bridge = new NotionBridge(host, { ...options(mock, join(root, 'session.json')), toolCallTimeoutMs: 500 })
+  try {
+    await bridge.start()
+    await waitFor(() => bridge.snapshot().status === 'ready')
+    mock.setBrokenStream(true)
+    await assert.rejects(host.tools.get('mcp__notion__notion-search').execute({ query: 'plans' }, {}))
+    assert.equal(bridge.snapshot().status, 'error')
+    assert.match(bridge.snapshot().error, /timed out/)
+    assert.equal(host.tools.size, 0)
+    mock.setBrokenStream(false)
+    await bridge.authorize()
+    await waitFor(() => bridge.snapshot().status === 'ready')
+    assert.equal(host.tools.size, 5)
+  } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('a slow tool timeout does not break other tools or the connection', async () => {
+  const mock = await startMockMcp({ toolDelay: 900 })
+  const root = await mkdtemp(join(tmpdir(), 'notion-slow-tool-'))
+  const host = makeHost()
+  const bridge = new NotionBridge(host, { ...options(mock, join(root, 'session.json')), toolCallTimeoutMs: 300 })
+  try {
+    await bridge.start()
+    await waitFor(() => bridge.snapshot().status === 'ready')
+    const search = host.tools.get('mcp__notion__notion-search')
+    const slow = assert.rejects(search.execute({ query: 'slow' }, {}), /timed out/i)
+    assert.match((await search.execute({ query: 'fast' }, {})).content[0].text, /Mock Notion page/)
+    await slow
+    assert.equal(bridge.snapshot().status, 'ready')
+    assert.equal(host.tools.size, 5)
+    assert.match((await search.execute({ query: 'again' }, {})).content[0].text, /Mock Notion page/)
+  } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('concurrent requests share a rotating token refresh', async () => {
+  const mock = await startMockMcp({ oauth: true, rotateRefresh: true, refreshDelay: 80 })
+  const root = await mkdtemp(join(tmpdir(), 'notion-refresh-single-flight-'))
+  const file = join(root, 'session.json')
+  const host = makeHost()
+  const bridge = new NotionBridge(host, options(mock, file))
+  try {
+    await bridge.start()
+    await waitFor(() => bridge.snapshot().status === 'authorizing')
+    await fetch(bridge.snapshot().authorizationUrl)
+    await waitFor(() => bridge.snapshot().status === 'ready')
+    mock.expire()
+    const [search, resources] = await Promise.all([
+      host.tools.get('mcp__notion__notion-search').execute({ query: 'plans' }, {}),
+      host.tools.get('mcp__notion__dsh_list_resources').execute({}, {}),
+    ])
+    assert.match(search.content[0].text, /Mock Notion page/)
+    assert.match(resources.content[0].text, /notion:\/\/docs\/example/)
+    assert.equal(mock.refreshes(), 1)
+    assert.equal((await new SessionStore(file).load()).tokens.refresh_token, 'rotated-refresh-1')
+    assert.equal(bridge.snapshot().status, 'ready')
+    mock.expire('second-refreshed-access-token')
+    mock.delaySecondDiscovery()
+    const [again, listed] = await Promise.all([
+      host.tools.get('mcp__notion__notion-search').execute({ query: 'again' }, {}),
+      host.tools.get('mcp__notion__dsh_list_resources').execute({}, {}),
+    ])
+    assert.match(again.content[0].text, /Mock Notion page/)
+    assert.match(listed.content[0].text, /notion:\/\/docs\/example/)
+    assert.equal(mock.refreshes(), 2)
+    assert.equal((await new SessionStore(file).load()).tokens.refresh_token, 'rotated-refresh-2')
+  } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('disconnect cancels both the refreshing request and a waiting request', async () => {
+  const mock = await startMockMcp({ oauth: true, rotateRefresh: true, refreshDelay: 1000 })
+  const root = await mkdtemp(join(tmpdir(), 'notion-refresh-cancel-'))
+  const file = join(root, 'session.json')
+  const host = makeHost()
+  const bridge = new NotionBridge(host, options(mock, file))
+  try {
+    await bridge.start()
+    await waitFor(() => bridge.snapshot().status === 'authorizing')
+    await fetch(bridge.snapshot().authorizationUrl)
+    await waitFor(() => bridge.snapshot().status === 'ready')
+    mock.expire()
+    const calls = [
+      host.tools.get('mcp__notion__notion-search').execute({ query: 'plans' }, {}).catch((error) => error),
+      host.tools.get('mcp__notion__dsh_list_resources').execute({}, {}).catch((error) => error),
+    ]
+    await waitFor(() => mock.refreshes() === 1)
+    await Promise.race([bridge.disconnect(), delay(1000).then(() => { throw new Error('disconnect did not cancel refresh') })])
+    assert.ok((await Promise.all(calls)).every((error) => error instanceof Error))
+    await assert.rejects(stat(file), { code: 'ENOENT' })
+    assert.equal(host.tools.size, 0)
+    assert.equal(bridge.snapshot().status, 'idle')
+  } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('disconnect fences an in-flight refresh even when issuer binding resumes late', async () => {
+  const mock = await startMockMcp({ oauth: true })
+  const root = await mkdtemp(join(tmpdir(), 'notion-refresh-race-'))
+  const file = join(root, 'session.json')
+  let entered
+  let release
+  const bindingStarted = new Promise((resolve) => { entered = resolve })
+  const resumeBinding = new Promise((resolve) => { release = resolve })
+  class PausingStore extends SessionStore {
+    pause = false
+    async patch(value, active) {
+      if (this.pause && value.clientInformation?.issuer) {
+        this.pause = false
+        entered()
+        await resumeBinding
+      }
+      return super.patch(value, active)
+    }
+  }
+  const store = new PausingStore(file)
+  const host = makeHost()
+  const bridge = new NotionBridge(host, { ...options(mock, file), store })
+  try {
+    await bridge.start()
+    await waitFor(() => bridge.snapshot().status === 'authorizing')
+    await fetch(bridge.snapshot().authorizationUrl)
+    await waitFor(() => bridge.snapshot().status === 'ready')
+    const { issuer, ...unstamped } = store.current.clientInformation
+    assert.ok(issuer)
+    await store.patch({ clientInformation: unstamped })
+    store.pause = true
+    mock.expire()
+    const call = host.tools.get('mcp__notion__notion-search').execute({ query: 'plans' }, {}).catch((error) => error)
+    await Promise.race([bindingStarted, delay(3000).then(() => { throw new Error('refresh did not reach issuer binding') })])
+    await bridge.disconnect()
+    release()
+    assert.ok(await call instanceof Error)
+    await assert.rejects(stat(file), { code: 'ENOENT' })
+    assert.equal((await new SessionStore(file).load()).tokens, undefined)
+    assert.equal(host.tools.size, 0)
+    assert.equal(bridge.snapshot().status, 'idle')
+    await bridge.authorize()
+    await waitFor(() => bridge.snapshot().status === 'authorizing')
+    await fetch(bridge.snapshot().authorizationUrl)
+    await waitFor(() => bridge.snapshot().status === 'ready')
+    assert.equal(host.tools.size, 5)
+  } finally { release(); await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('validates structured results from every tool page and preserves tool errors', async () => {
+  const schema = { type: 'object', properties: { count: { type: 'integer', minimum: 1 } }, required: ['count'], additionalProperties: false }
+  const definition = (name) => ({ name, inputSchema: { type: 'object' }, outputSchema: schema })
+  const mock = await startMockMcp({
+    toolPages: [[definition('first')], [definition('last')]],
+    toolResult: (message) => {
+      const mode = message.params.arguments?.mode
+      if (mode === 'error') return { isError: true, content: [{ type: 'text', text: 'Permission denied' }] }
+      if (mode === 'missing') return { content: [] }
+      return { content: [], structuredContent: { count: mode === 'invalid' ? 0 : 2 } }
+    },
+  })
+  const root = await mkdtemp(join(tmpdir(), 'notion-schema-'))
+  const host = makeHost()
+  const bridge = new NotionBridge(host, options(mock, join(root, 'session.json')))
+  try {
+    await bridge.start()
+    await waitFor(() => bridge.snapshot().status === 'ready')
+    for (const name of ['first', 'last']) {
+      const tool = host.tools.get(`mcp__notion__${name}`)
+      assert.match((await tool.execute({}, {})).content[0].text, /"count":2/)
+      await assert.rejects(tool.execute({ mode: 'invalid' }, {}), /does not match/)
+      await assert.rejects(tool.execute({ mode: 'missing' }, {}), /structured (content|output)/i)
+      await assert.rejects(tool.execute({ mode: 'error' }, {}), /Permission denied/)
+    }
+  } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
+})

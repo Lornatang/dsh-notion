@@ -1,13 +1,17 @@
 import { createHash } from 'node:crypto'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { setTimeout as delay } from 'node:timers/promises'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
+import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { UnauthorizedError, auth } from '@modelcontextprotocol/sdk/client/auth.js'
+import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { NotionOAuthProvider, CallbackServer, createCloudFetch, type Logger } from './oauth.js'
 import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js'
+import type { OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js'
 import { openInBrowser } from './open-url.js'
 import type { SessionStore } from './store.js'
+import { deferredOutputValidation, validateOutput } from './output-validator.js'
 
 export interface BridgeHost { register(definition: ToolDefinition): () => void; logger: Logger }
 export interface BridgeOptions {
@@ -20,6 +24,22 @@ export interface BridgeSnapshot {
   authorizationUrl: string | undefined
   toolCount: number
   error: string | undefined
+}
+interface OperationContext {
+  observedTokens?: OAuthTokens
+  refreshExpected?: OAuthTokens
+  releaseRefresh?: () => void
+  responseStreamEnded?: boolean
+}
+
+async function waitForFlight(flight: Promise<void>, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) throw new Error('notion: connection cancelled')
+  await new Promise<void>((resolve, reject) => {
+    const abort = (): void => { signal.removeEventListener('abort', abort); reject(new Error('notion: connection cancelled')) }
+    signal.addEventListener('abort', abort, { once: true })
+    void flight.then(() => { signal.removeEventListener('abort', abort); resolve() }, reject)
+    if (signal.aborted) abort()
+  })
 }
 
 export function publicToolName(server: string, tool: string): string {
@@ -43,8 +63,7 @@ export class NotionBridge {
   readonly #host: BridgeHost
   readonly #options: BridgeOptions
   readonly #callback = new CallbackServer()
-  readonly #provider: NotionOAuthProvider
-  readonly #fetch: FetchLike
+  readonly #operation = new AsyncLocalStorage<OperationContext>()
   #client?: Client
   #tools = new Map<string, { raw: string; dispose: () => void }>()
   #status: BridgeStatus = 'idle'
@@ -52,6 +71,7 @@ export class NotionBridge {
   #error?: string
   #work?: Promise<void>
   #boot?: Promise<void>
+  #disconnect?: Promise<void>
   #generation = 0
   #disposed = false
   #controller = new AbortController()
@@ -59,13 +79,7 @@ export class NotionBridge {
   constructor(host: BridgeHost, options: BridgeOptions) {
     this.#host = host
     this.#options = options
-    const network = createCloudFetch(new URL(options.url))
-    this.#fetch = (value, init) => {
-      const signals = [this.#controller.signal, AbortSignal.timeout(options.toolCallTimeoutMs)]
-      if (init?.signal) signals.push(init.signal)
-      return network.fetch(value, { ...init, signal: AbortSignal.any(signals) })
-    }
-    this.#provider = new NotionOAuthProvider({ store: options.store, redirectUri: () => this.#callback.redirectUri, allowLoopbackHttp: network.allowLoopbackHttp, serverOrigin: new URL(options.url).origin, logger: host.logger, onAuthorizationUrl: (url) => { this.#url = url } })
+    createCloudFetch(new URL(options.url))
   }
 
   snapshot(): BridgeSnapshot {
@@ -73,6 +87,8 @@ export class NotionBridge {
   }
 
   async start(): Promise<void> {
+    if (this.#disconnect) await this.#disconnect
+    if (this.#disposed) return
     if (this.#boot) return this.#boot
     const generation = this.#generation
     const boot = (async () => {
@@ -100,28 +116,41 @@ export class NotionBridge {
   }
 
   async authorize(): Promise<BridgeSnapshot> {
-    await this.#boot
+    const generation = this.#generation
+    if (this.#disconnect) await this.#disconnect
+    if (this.#boot) await this.#boot
+    if (generation !== this.#generation || this.#disconnect) return this.snapshot()
     if (this.#disposed || this.#status === 'ready') return this.snapshot()
     if (this.#status === 'authorizing' && this.#url) {
       if (this.#options.autoOpenBrowser) await openInBrowser(this.#url)
       return this.snapshot()
     }
     if (!this.#work) {
-      await this.#closeClient()
-      this.#clearTools()
+      this.#status = 'connecting'
+      this.#error = undefined
       this.#url = undefined
-      this.#launch(true, this.#generation)
+      this.#launch(true, this.#generation, true)
     }
     for (let i = 0; i < 800 && this.#status === 'connecting' && !this.#url; i++) await delay(25)
     return this.snapshot()
   }
 
-  #launch(open: boolean, generation: number): void {
-    const work = this.#connect(open, generation).catch((error: unknown) => {
+  #launch(open: boolean, generation: number, reset = false): void {
+    const work = (async () => {
+      if (reset) {
+        await this.#closeClient()
+        if (this.#disposed || generation !== this.#generation) return
+        this.#clearTools()
+      }
+      await this.#operation.run({}, () => this.#connect(open, generation))
+    })().catch(async (error: unknown) => {
       if (!this.#disposed && generation === this.#generation) {
         this.#status = 'error'
+        this.#url = undefined
         this.#error = error instanceof Error ? error.message : String(error)
         this.#host.logger.error(`notion: ${this.#error}`)
+        await this.#closeClient()
+        this.#clearTools()
       }
     })
     this.#work = work
@@ -130,30 +159,92 @@ export class NotionBridge {
 
   async #connect(open: boolean, generation: number): Promise<void> {
     const check = (): void => { if (this.#disposed || generation !== this.#generation) throw new Error('connection cancelled') }
+    const active = (): boolean => !this.#disposed && generation === this.#generation
+    const signal = this.#controller.signal
+    const serverUrl = new URL(this.#options.url)
+    const allowLoopbackHttp = createCloudFetch(serverUrl).allowLoopbackHttp
+    let flight: { owner: OperationContext; done: Promise<void> } | undefined
+    const fetch: FetchLike = async (value, init) => {
+      const signals = [signal, AbortSignal.timeout(this.#options.toolCallTimeoutMs)]
+      if (init?.signal) signals.push(init.signal)
+      const combined = AbortSignal.any(signals)
+      const operation = this.#operation.getStore()
+      const accept = new Headers(init?.headers).get('accept') ?? ''
+      if (operation && accept.includes('text/event-stream')) {
+        const authorization = new Headers(init?.headers).get('authorization')
+        const tokens = this.#options.store.current.tokens
+        const previous = operation.observedTokens
+        operation.observedTokens = previous && authorization === `Bearer ${previous.access_token}` ? previous
+          : tokens && authorization === `Bearer ${tokens.access_token}` ? tokens : undefined
+      }
+      const network = createCloudFetch(serverUrl, {
+        onLimit: () => this.#breakGeneration(generation, new Error('MCP response exceeds the byte limit')),
+        onStreamEnd: () => {
+          if (operation && init?.method?.toUpperCase() === 'POST' && accept.includes('text/event-stream') && !combined.aborted) operation.responseStreamEnded = true
+        },
+      })
+      const refresh = init?.body instanceof URLSearchParams && init.body.get('grant_type') === 'refresh_token'
+      if (refresh && operation) {
+        const target = new URL(value)
+        if (target.origin !== serverUrl.origin || target.username || target.password) throw new Error('MCP and OAuth endpoints must use the configured server origin')
+        const expected = operation.observedTokens
+        while (flight && flight.owner !== operation) await waitForFlight(flight.done, combined)
+        if (!active() || combined.aborted) throw new Error('notion: connection cancelled')
+        operation.refreshExpected = expected
+        const current = this.#options.store.current.tokens
+        if (expected && current !== expected) {
+          return new Response(JSON.stringify(current ?? { error: 'invalid_grant' }), { status: current ? 200 : 400, headers: { 'content-type': 'application/json' } })
+        }
+        if (!flight) {
+          let complete!: () => void
+          const done = new Promise<void>((resolve) => { complete = resolve })
+          const release = (): void => {
+            if (flight?.owner === operation) { flight = undefined; combined.removeEventListener('abort', release); complete() }
+            if (operation.releaseRefresh === release) operation.releaseRefresh = undefined
+          }
+          flight = { owner: operation, done }
+          operation.releaseRefresh = release
+          combined.addEventListener('abort', release, { once: true })
+          if (combined.aborted) release()
+        }
+        try { return await network.fetch(value, { ...init, signal: combined }) }
+        catch (error) { operation.releaseRefresh?.(); throw error }
+      }
+      return network.fetch(value, { ...init, signal: combined })
+    }
+    const provider = new NotionOAuthProvider({
+      store: this.#options.store, redirectUri: () => this.#callback.redirectUri, allowLoopbackHttp, serverOrigin: serverUrl.origin,
+      logger: this.#host.logger, active, onAuthorizationUrl: (url) => { if (active()) this.#url = url },
+      tokenRead: (tokens) => { const operation = this.#operation.getStore(); if (operation && !operation.observedTokens) operation.observedTokens = tokens },
+      refreshExpected: () => this.#operation.getStore()?.refreshExpected,
+      authFinished: () => { const operation = this.#operation.getStore(); operation?.releaseRefresh?.(); if (operation) operation.refreshExpected = undefined },
+    })
     for (let attempt = 0; attempt < 2; attempt++) {
       check()
       this.#status = 'connecting'
       this.#error = undefined
-      const client = new Client({ name: 'dsh-notion', version: '0.1.0' })
-      const transport = new StreamableHTTPClientTransport(new URL(this.#options.url), { authProvider: this.#provider, fetch: this.#fetch })
+      const client = new Client({ name: 'dsh-notion', version: '0.1.1' }, { jsonSchemaValidator: deferredOutputValidation })
+      client.onclose = () => { if (this.#client === client) this.#breakGeneration(generation, new Error('MCP connection closed')) }
+      client.onerror = (error) => { if (this.#client === client && this.#status === 'ready' && this.#isConnectionFailure(error)) this.#breakGeneration(generation, error) }
+      const transport = new StreamableHTTPClientTransport(new URL(this.#options.url), { authProvider: provider, fetch })
       try { await client.connect(transport); check() }
       catch (error) {
         await transport.close().catch(() => undefined)
         check()
         if (!(error instanceof UnauthorizedError) || attempt !== 0) throw error
         const state = this.#url ? new URL(this.#url).searchParams.get('state') ?? undefined : undefined
-        const waiting = this.#callback.waitForCode(this.#options.authorizationTimeoutMs, state)
+        const waiting = this.#callback.waitForCode(this.#options.authorizationTimeoutMs, state, signal)
         this.#status = 'authorizing'
         if (open && this.#url && this.#options.autoOpenBrowser) void openInBrowser(this.#url)
         const callback = await waiting
         check()
-        await auth(this.#provider, { serverUrl: this.#options.url, authorizationCode: callback.code, fetchFn: this.#fetch })
+        await auth(provider, { serverUrl: this.#options.url, authorizationCode: callback.code, fetchFn: fetch })
         check()
-        await this.#options.store.clear('codeVerifier')
+        await this.#options.store.clearIf(active, 'codeVerifier')
         continue
       }
       this.#client = client
-      await this.#registerTools(client)
+      await this.#registerTools(client, signal)
       check()
       this.#url = undefined
       this.#status = 'ready'
@@ -162,8 +253,8 @@ export class NotionBridge {
     throw new Error('Notion authorization did not establish a connection')
   }
 
-  async #registerTools(client: Client): Promise<void> {
-    const found: Array<{ name: string; description?: string; inputSchema: unknown }> = []
+  async #registerTools(client: Client, signal: AbortSignal): Promise<void> {
+    const found: Array<{ name: string; description?: string; inputSchema: unknown; outputSchema?: unknown }> = []
     const seen = new Set<string>()
     let cursor: string | undefined
     do {
@@ -192,19 +283,24 @@ export class NotionBridge {
             render: (_args: unknown, result: unknown) => [{ type: 'text', text: display((result as { content?: unknown })?.content) }],
           },
           execute: async (args: unknown, context: { signal?: AbortSignal }) => {
-            const result = await client.callTool({ name: tool.name, arguments: (typeof args === 'object' && args !== null ? args : {}) as Record<string, unknown> }, undefined, { timeout: this.#options.toolCallTimeoutMs, signal: context.signal })
+            const combined = context.signal ? AbortSignal.any([signal, context.signal]) : signal
+            const result = await this.#request(client, combined, () => client.callTool({ name: tool.name, arguments: (typeof args === 'object' && args !== null ? args : {}) as Record<string, unknown> }, undefined, { timeout: this.#options.toolCallTimeoutMs, signal: combined }))
             if (result.isError) throw new Error(display(result.content) || 'Notion MCP tool failed')
+            if (tool.outputSchema) {
+              if (result.structuredContent === undefined) throw new Error(`notion: tool ${tool.name} did not return structured output`)
+              await validateOutput(tool.outputSchema, result.structuredContent, this.#options.toolCallTimeoutMs, combined)
+            }
             const content = Array.isArray(result.content) && result.content.length ? result.content : result.structuredContent === undefined ? [] : [{ type: 'text', text: JSON.stringify(result.structuredContent) }]
             return { content }
           },
         } as ToolDefinition
         this.#tools.set(name, { raw: tool.name, dispose: this.#host.register(definition) })
       }
-      if (client.getServerCapabilities()?.resources) this.#registerResourceTools(client)
+      if (client.getServerCapabilities()?.resources) this.#registerResourceTools(client, signal)
     } catch (error) { this.#clearTools(); throw error }
   }
 
-  #registerResourceTools(client: Client): void {
+  #registerResourceTools(client: Client, connectionSignal: AbortSignal): void {
     const schema = { type: 'object', properties: { cursor: { type: 'string', description: 'Continuation cursor from a previous response' } }, additionalProperties: false }
     const define = (raw: string, description: string, parameters: unknown, action: (args: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>): void => {
       const name = publicToolName(this.#options.serverName, raw)
@@ -216,7 +312,8 @@ export class NotionBridge {
           render: (_args: unknown, result: unknown) => [{ type: 'text', text: display((result as { content?: unknown })?.content) }],
         },
         execute: async (args: Record<string, unknown>, context: { signal?: AbortSignal }) => {
-          const value = await action(args ?? {}, context.signal)
+          const signal = context.signal ? AbortSignal.any([connectionSignal, context.signal]) : connectionSignal
+          const value = await this.#request(client, signal, () => action(args ?? {}, signal))
           return { content: [{ type: 'text', text: JSON.stringify(value) }] }
         },
       } as ToolDefinition
@@ -237,6 +334,15 @@ export class NotionBridge {
   }
 
   async disconnect(): Promise<BridgeSnapshot> {
+    if (!this.#disconnect) {
+      const work = this.#disconnectNow()
+      this.#disconnect = work
+      void work.finally(() => { if (this.#disconnect === work) this.#disconnect = undefined }).catch(() => undefined)
+    }
+    await this.#disconnect
+    return this.snapshot()
+  }
+  async #disconnectNow(): Promise<void> {
     this.#generation++
     this.#status = 'idle'
     this.#controller.abort()
@@ -252,11 +358,11 @@ export class NotionBridge {
       this.#url = undefined
       this.#error = undefined
     }
-    return this.snapshot()
   }
   async dispose(): Promise<void> {
     if (this.#disposed) return
     this.#disposed = true
+    await this.#disconnect
     this.#generation++
     this.#status = 'idle'
     this.#controller.abort()
@@ -276,5 +382,31 @@ export class NotionBridge {
   #clearTools(): void {
     for (const value of this.#tools.values()) value.dispose()
     this.#tools.clear()
+  }
+  #isConnectionFailure(error: Error): boolean {
+    return error instanceof TypeError || error instanceof UnauthorizedError || error instanceof StreamableHTTPError ||
+      (error instanceof McpError && error.code === ErrorCode.ConnectionClosed)
+  }
+  async #request<T>(client: Client, signal: AbortSignal, action: () => Promise<T>): Promise<T> {
+    const operation: OperationContext = {}
+    try { return await this.#operation.run(operation, action) }
+    catch (error) {
+      if (!signal.aborted && operation.responseStreamEnded && this.#client === client && error instanceof McpError && error.code === ErrorCode.RequestTimeout) {
+        this.#breakGeneration(this.#generation, new Error('MCP request timed out; reconnect to try again'))
+      }
+      throw error
+    }
+  }
+  #breakGeneration(generation: number, error: Error): void {
+    if (this.#disposed || generation !== this.#generation) return
+    this.#generation++
+    this.#controller.abort()
+    this.#controller = new AbortController()
+    this.#callback.cancelWait()
+    this.#status = 'error'
+    this.#error = error.message
+    this.#url = undefined
+    this.#clearTools()
+    void this.#closeClient()
   }
 }

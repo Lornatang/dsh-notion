@@ -2,31 +2,34 @@
 
 [English](README.md)
 
-将 Notion 官方 MCP 服务接入 DeepSeek Harness（DSH）。插件在 DSH Web 中提供
+将 Notion 官方 MCP 服务接入 DeepSeek Harness（DSH）。插件在 DSH 桌面版和 Web 中提供
 Notion 连接设置，并向智能体会话注册 Notion 提供的工具，可按账户权限搜索、读取和
 管理页面、数据库等内容。
 
-需要 Node.js 22.19+、DSH 0.2.2-rc.2+ 和 DSH Web 配置。本项目由社区维护，
+需要 Node.js 22.19+、DSH 0.2.2-rc.2+ 和兼容 Web 的配置。本项目由社区维护，
 不属于 Notion 或 DeepSeek。
 
 ## 安装
 
+DSH 桌面版使用 `desktop` 配置：
+
 ```bash
-dsh plugin --profile web add https://github.com/Lornatang/dsh-notion/archive/refs/heads/main.tar.gz
+dsh plugin --profile desktop add @lornatang/dsh-notion
 ```
 
-重启 DSH，或使用 `dsh web --no-open` 启动 Web 配置。如果配置名称不是 `web`，
-请替换命令中的配置名称。安装地址跟随仓库的 `main` 分支。
+默认 Web 配置请将 `desktop` 替换为 `web`；自定义配置请填写实际名称。安装后重启
+DSH，或使用 `dsh web --no-open` 启动 Web 配置。更新时使用相同命令并重启，配置和
+凭据会保留。
 
-更新时请使用包含最新提交 ID 的地址，然后重启 DSH。重复使用同一个分支压缩包地址
-可能命中旧缓存：
+也可安装 GitHub 上的指定提交：
 
 ```bash
 revision=$(git ls-remote https://github.com/Lornatang/dsh-notion.git refs/heads/main | cut -f1)
-dsh plugin --profile web add "https://github.com/Lornatang/dsh-notion/archive/${revision}.tar.gz"
+dsh plugin --profile desktop add "https://github.com/Lornatang/dsh-notion/archive/${revision}.tar.gz"
 ```
 
-也可以从源码构建并安装本地压缩包：
+更新时建议使用提交 ID 或版本标签，避免分支压缩包地址命中旧缓存。也可以从源码
+构建并安装本地压缩包：
 
 ```bash
 git clone https://github.com/Lornatang/dsh-notion.git
@@ -34,12 +37,12 @@ cd dsh-notion
 npm ci
 npm run build
 npm pack --ignore-scripts
-dsh plugin --profile web add "$PWD/lornatang-dsh-notion-0.1.0.tgz"
+dsh plugin --profile desktop add "$PWD/lornatang-dsh-notion-0.1.1.tgz"
 ```
 
 ## 连接
 
-1. 在 DSH Web 打开 **设置 → Notion**。
+1. 在 DSH 桌面版或 Web 打开 **设置 → Notion**。
 2. 点击 **前往 Notion 授权**，在 Notion 完成登录和授权；连接超时后可先点击
    **连接 Notion** 重新发起。
 3. 返回 DSH，连接成功后会显示可用工具数量。随后可以让智能体搜索、读取或更新
@@ -47,7 +50,8 @@ dsh plugin --profile web add "$PWD/lornatang-dsh-notion-0.1.0.tgz"
 
 插件采用 OAuth 2.0 授权码流程和 PKCE，不需要输入 Notion 密码。工具及其参数由
 Notion 在连接时提供，具体功能取决于 Notion 服务、账户和工作区权限；工具更新后
-需要重新连接。支持资源的服务器还会提供 MCP 资源列表和读取工具。企业工作区可能
+需要重新连接。请核对 Notion 授权页：授权也可能涉及工作区成员信息和已连接应用。
+支持资源的服务器还会提供 MCP 资源列表和读取工具。企业工作区可能
 需要管理员批准此 MCP 客户端。工具名称以 `mcp__notion__` 开头。
 
 ## 凭据与安全
@@ -73,10 +77,15 @@ Service，插件不会退回到内核临时钥匙串或明文保存。
 请同时前往 Notion 的连接设置。智能体可以使用该 Notion 账户已有的内容修改权限，
 DSH 自身的工具权限机制仍然适用。请保护 DSH 运行账户和主机。
 
+MCP 和 OAuth 响应在解压后限制为 16 MiB；流式响应按单个事件计数。工具的结构化
+输出在隔离工作线程中校验，最长 5 秒（若工具超时更短，则使用较短的时间）。超过
+限制的请求会失败；如果正常结果过大，可缩小请求范围。
+
 ## 配置
 
-编辑 `~/.dsh/profiles/web/cordis.patch.yml` 中的 `notion` 项（如使用 `$DSH_HOME`，
-请替换 `~/.dsh`），然后重启 DSH：
+编辑 `~/.dsh/profiles/<profile>/cordis.patch.yml` 中的 `notion` 项（如使用
+`$DSH_HOME`，请替换 `~/.dsh`）。标准桌面版的配置名为 `desktop`，默认 Web 配置名
+为 `web`；修改后重启 DSH：
 
 ```yaml
 - id: notion
@@ -97,6 +106,27 @@ DSH 自身的工具权限机制仍然适用。请保护 DSH 运行账户和主�
 | `toolCallTimeoutMs` | `60000` | 单次工具或资源请求超时，单位为毫秒。 |
 | `authorizationTimeoutMs` | `300000` | 完成授权的时间限制，单位为毫秒。 |
 | `autoOpenBrowser` | `false` | 点击连接时同时在 DSH 主机打开授权页。 |
+
+## 故障排查
+
+- **安全密钥存储不可用：**解锁系统钥匙串，或按上文设置持久的
+  `DSH_NOTION_ENCRYPTION_KEY`。Linux 用户还需检查 Secret Service 和 D-Bus。
+- **无法解密凭据：**恢复原密钥及配置路径，或在停止 DSH 后删除该加密凭据文件并重新授权。
+- **授权未返回：**检查本地回调端口以及远程主机的端口转发；超时后重新点击连接。
+- **连接中断或工具不可用：**检查网络、Notion 服务状态、工作区权限和 DSH 日志；
+  可以点击 **连接 Notion** 重连，有效的现有凭据会继续使用。
+
+## 卸载
+
+先在 **设置 → Notion** 中断开连接，删除本地凭据，然后运行：
+
+```bash
+dsh plugin --profile desktop remove @lornatang/dsh-notion
+```
+
+Web 或自定义配置请替换配置名称，卸载后重启 DSH。本地断开不会撤销 Notion 端授权，
+需要在 Notion 中单独管理。如果已卸载插件，请先停止 DSH，再删除对应配置下的
+`data/dsh-notion-*.json` 文件。
 
 ## 开发与验证
 

@@ -15,7 +15,10 @@ export declare class SessionStore {
     get file(): string;
     get current(): StoredSession;
     load(): Promise<StoredSession>;
-    patch(patch: Partial<StoredSession>): Promise<void>;
+    patch(patch: Partial<StoredSession>, active?: () => boolean): Promise<void>;
+    saveTokens(tokens: OAuthTokens, active: () => boolean, expected?: OAuthTokens): Promise<void>;
+    clearCredentialsIf(active: () => boolean, expected: OAuthTokens | undefined, ...fields: readonly (keyof StoredSession)[]): Promise<void>;
     clear(...fields: readonly (keyof StoredSession)[]): Promise<void>;
+    clearIf(active: (() => boolean) | undefined, ...fields: readonly (keyof StoredSession)[]): Promise<void>;
     destroy(): Promise<void>;
 }

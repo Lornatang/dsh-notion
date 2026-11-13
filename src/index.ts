@@ -11,7 +11,12 @@ export { Config }
 interface Scope {
   get(name: string): unknown
   profileContext?: { patchPath?: string }
-  on?(event: string, callback: () => void): (() => void) | undefined
+  on?(event: string, callback: (name?: string) => void): (() => void) | undefined
+}
+
+function serviceIdentity(value: unknown): unknown {
+  if ((typeof value !== 'object' || value === null) && typeof value !== 'function') return value
+  return (value as Record<symbol, unknown>)[Symbol.for('cordis.original')] ?? value
 }
 
 export function apply(ctx: Context, config: Settings): void {
@@ -22,18 +27,25 @@ export function apply(ctx: Context, config: Settings): void {
   ctx.effect(() => () => bridge.dispose(), 'notion:connection')
   ctx.effect(() => {
     let dispose: (() => void) | undefined
-    let secured = false
+    let boundWeb: unknown
+    let boundFence: unknown
     const bind = (): void => {
       const web = (scope.get('webServer') ?? scope.get('httpServer')) as RouteRegistrar | undefined
-      if (!web) return
       const fence = scope.get('connection') as RequestFence | undefined
-      if (dispose && (secured || !fence)) return
+      const webIdentity = serviceIdentity(web)
+      const fenceIdentity = serviceIdentity(fence)
+      if (dispose && webIdentity === boundWeb && fenceIdentity === boundFence) return
       dispose?.()
+      dispose = undefined
+      boundWeb = webIdentity
+      boundFence = fenceIdentity
+      if (!web) return
       dispose = registerRoutes(web, bridge, fence)
-      secured = !!fence
     }
     bind()
-    const off = scope.on?.('internal/service', bind)
+    const off = scope.on?.('internal/service', (name) => {
+      if (!name || name === 'connection' || name === 'webServer' || name === 'httpServer') bind()
+    })
     return () => { off?.(); dispose?.() }
   }, 'notion:routes')
   void bridge.start().catch((error: unknown) => ctx.logger.error(`notion: ${String(error)}`))

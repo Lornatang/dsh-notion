@@ -4,31 +4,35 @@
 
 Connect Notion's official MCP server to DeepSeek Harness (DSH). The plugin
 registers Notion's available tools in agent sessions and adds a Notion
-connection page to DSH Web. Ask an agent to search or work with pages,
+connection page to DSH Desktop and Web. Ask an agent to search or work with pages,
 databases, and other content supported by your Notion account.
 
-**Requires:** Node.js 22.19+, DSH 0.2.2-rc.2+, and a DSH Web profile.
+**Requires:** Node.js 22.19+, DSH 0.2.2-rc.2+, and a Web-compatible profile.
 This is a community project, not a Notion or DeepSeek product.
 
-## Install from GitHub
+## Install
+
+For DSH Desktop, install into the `desktop` profile:
 
 ```bash
-dsh plugin --profile web add https://github.com/Lornatang/dsh-notion/archive/refs/heads/main.tar.gz
+dsh plugin --profile desktop add @lornatang/dsh-notion
 ```
 
-Restart DSH, or start the Web profile with `dsh web --no-open`. Replace `web`
-with the name of your profile if necessary. The installation URL tracks the
-repository's `main` branch.
+For the default Web profile, replace `desktop` with `web`; use your profile's
+name if it differs. Restart DSH, or start Web with `dsh web --no-open`. Use the
+same command to update the package and restart DSH; profile settings and
+credentials are retained.
 
-To update, use a URL containing the latest commit ID and then restart DSH.
-Repeating the same branch archive URL may reuse a cached older package:
+To install a specific repository revision instead of the npm package:
 
 ```bash
 revision=$(git ls-remote https://github.com/Lornatang/dsh-notion.git refs/heads/main | cut -f1)
-dsh plugin --profile web add "https://github.com/Lornatang/dsh-notion/archive/${revision}.tar.gz"
+dsh plugin --profile desktop add "https://github.com/Lornatang/dsh-notion/archive/${revision}.tar.gz"
 ```
 
-To build and install a local package instead:
+Use a commit ID or release tag rather than a mutable branch archive when
+updating, because the package manager can cache archive URLs. To build and
+install a local package instead:
 
 ```bash
 git clone https://github.com/Lornatang/dsh-notion.git
@@ -36,12 +40,12 @@ cd dsh-notion
 npm ci
 npm run build
 npm pack --ignore-scripts
-dsh plugin --profile web add "$PWD/lornatang-dsh-notion-0.1.0.tgz"
+dsh plugin --profile desktop add "$PWD/lornatang-dsh-notion-0.1.1.tgz"
 ```
 
 ## Connect
 
-1. Open **Settings → Notion** in DSH Web.
+1. Open **Settings → Notion** in DSH Desktop or Web.
 2. Select **Authorize in Notion**, then sign in and approve the connection in
    Notion. If the connection has expired, select **Connect Notion** first.
 3. Return to DSH; the page shows **Connected** and the number of available
@@ -49,8 +53,9 @@ dsh plugin --profile web add "$PWD/lornatang-dsh-notion-0.1.0.tgz"
 
 The plugin uses OAuth 2.0 authorization code flow with PKCE. It never asks for
 your Notion password. Notion decides which tools are available and applies
-your workspace permissions. An Enterprise workspace may require an admin to
-approve this MCP client.
+your workspace permissions. Review the Notion consent screen: access may also
+include workspace members and connected applications. An Enterprise workspace
+may require an admin to approve this MCP client.
 
 Tools are registered as `mcp__notion__…`. The plugin also exposes MCP resource
 listing and reading tools when the server supports resources, so an agent can
@@ -93,10 +98,18 @@ The connected agent acts with your Notion permissions, including permissions to
 change content. DSH's normal tool permissions still apply. The plugin does not
 bridge MCP prompts or binary resource content as native media.
 
+MCP and OAuth responses are limited to 16 MiB after decompression; streaming
+responses use the same limit per event. Structured tool output is validated in
+an isolated worker with a maximum five-second budget (or the configured tool
+timeout, whichever is shorter). Oversized responses and validation timeouts
+fail instead of blocking DSH; narrow a request if a legitimate result exceeds
+the limit.
+
 ## Configuration
 
-Edit `~/.dsh/profiles/web/cordis.patch.yml` (or use `$DSH_HOME` in place of
-`~/.dsh`). Restart DSH after changing the `notion` entry:
+Edit `~/.dsh/profiles/<profile>/cordis.patch.yml` (or use `$DSH_HOME` in place
+of `~/.dsh`). Use `desktop` for the standard Desktop profile and `web` for the
+default Web profile. Restart DSH after changing the `notion` entry:
 
 ```yaml
 - id: notion
@@ -129,6 +142,21 @@ Edit `~/.dsh/profiles/web/cordis.patch.yml` (or use `$DSH_HOME` in place of
   forwarding. If the authorization timed out, choose **Connect Notion** again.
 - **Tools are missing or a request is denied:** Check Notion MCP availability,
   workspace administrator policy, your Notion permissions, and the DSH log.
+- **Connection failed after a network interruption:** Select **Connect Notion**
+  to reconnect. Existing credentials are reused when still valid.
+
+## Uninstall
+
+Disconnect in **Settings → Notion** first to remove local credentials, then:
+
+```bash
+dsh plugin --profile desktop remove @lornatang/dsh-notion
+```
+
+Use `web` or your custom profile name as appropriate, then restart DSH.
+Disconnecting locally does not revoke the Notion grant; manage that separately
+in Notion. If already uninstalled, stop DSH before removing the corresponding
+`data/dsh-notion-*.json` file from the affected profile.
 
 ## Development
 

@@ -12,7 +12,11 @@ export interface AuthorizationCallback {
     state: string | undefined;
 }
 /** Restrict every discovered OAuth and MCP endpoint, including redirect targets. */
-export declare function createCloudFetch(serverUrl: URL): {
+export declare function createCloudFetch(serverUrl: URL, options?: {
+    maxResponseBytes?: number;
+    onLimit?: () => void;
+    onStreamEnd?: () => void;
+}): {
     fetch: FetchLike;
     allowLoopbackHttp: boolean;
 };
@@ -33,6 +37,10 @@ export declare class NotionOAuthProvider implements OAuthClientProvider {
         allowLoopbackHttp: boolean;
         serverOrigin: string;
         logger: Logger;
+        active?: () => boolean;
+        tokenRead?: (value: OAuthTokens | undefined) => void;
+        refreshExpected?: () => OAuthTokens | undefined;
+        authFinished?: () => void;
     });
     get redirectUrl(): string;
     get clientMetadata(): OAuthClientMetadata;
