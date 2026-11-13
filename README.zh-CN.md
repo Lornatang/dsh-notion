@@ -16,7 +16,15 @@ dsh plugin --profile web add https://github.com/Lornatang/dsh-notion/archive/ref
 ```
 
 重启 DSH，或使用 `dsh web --no-open` 启动 Web 配置。如果配置名称不是 `web`，
-请替换命令中的配置名称。更新时再次执行安装命令并重启；该地址跟随仓库的 `main` 分支。
+请替换命令中的配置名称。安装地址跟随仓库的 `main` 分支。
+
+更新时请使用包含最新提交 ID 的地址，然后重启 DSH。重复使用同一个分支压缩包地址
+可能命中旧缓存：
+
+```bash
+revision=$(git ls-remote https://github.com/Lornatang/dsh-notion.git refs/heads/main | cut -f1)
+dsh plugin --profile web add "https://github.com/Lornatang/dsh-notion/archive/${revision}.tar.gz"
+```
 
 也可以从源码构建并安装本地压缩包：
 

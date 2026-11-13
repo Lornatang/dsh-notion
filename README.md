@@ -17,8 +17,16 @@ dsh plugin --profile web add https://github.com/Lornatang/dsh-notion/archive/ref
 ```
 
 Restart DSH, or start the Web profile with `dsh web --no-open`. Replace `web`
-with the name of your profile if necessary. Run the install command again and
-restart DSH to update. The URL tracks the repository's `main` branch.
+with the name of your profile if necessary. The installation URL tracks the
+repository's `main` branch.
+
+To update, use a URL containing the latest commit ID and then restart DSH.
+Repeating the same branch archive URL may reuse a cached older package:
+
+```bash
+revision=$(git ls-remote https://github.com/Lornatang/dsh-notion.git refs/heads/main | cut -f1)
+dsh plugin --profile web add "https://github.com/Lornatang/dsh-notion/archive/${revision}.tar.gz"
+```
 
 To build and install a local package instead:
 
