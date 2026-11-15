@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.5 - 2026-11-15
+
+- Rewrite the README to the package-bundle documentation convention and add a
+  Chinese translation; the package now ships `README.md` and `README.zh.md`.
+- Publish `cordis.patch.yml` through the package `exports` map and include the
+  Chinese README in the published files.
+
 ## 0.1.4
 
 - Allow any DSH version in the package metadata and run integration checks against the selected host.
