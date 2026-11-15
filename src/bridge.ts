@@ -127,6 +127,9 @@ export class NotionBridge {
     if (this.#boot) await this.#boot
     if (generation !== this.#generation || this.#disconnect) return this.snapshot()
     if (this.#disposed || this.#status === 'ready') return this.snapshot()
+    // A failed initial bind must be retried before the SDK registers a redirect URI.
+    if (!this.#callback.listening) await this.start()
+    if (generation !== this.#generation || this.#disposed || this.#disconnect || this.snapshot().status === 'ready') return this.snapshot()
     if (this.#status === 'authorizing' && this.#url) {
       if (this.#options.autoOpenBrowser) await openInBrowser(this.#url)
       return this.snapshot()
@@ -183,12 +186,15 @@ export class NotionBridge {
       times.push(now)
     }
     const fetch: FetchLike = async (value, init) => {
-      const signals = [signal, AbortSignal.timeout(this.#options.toolCallTimeoutMs)]
+      const accept = new Headers(init?.headers).get('accept') ?? ''
+      const eventStream = (init?.method?.toUpperCase() ?? 'GET') === 'GET' && accept.includes('text/event-stream')
+      // A server event stream lives for the connection, not a single tool call.
+      const signals = [signal]
+      if (!eventStream) signals.push(AbortSignal.timeout(this.#options.toolCallTimeoutMs))
       if (init?.signal) signals.push(init.signal)
       const combined = AbortSignal.any(signals)
       const operation = this.#operation.getStore()
-      const accept = new Headers(init?.headers).get('accept') ?? ''
-      if (init?.method?.toUpperCase() === 'GET' && accept.includes('text/event-stream')) {
+      if (eventStream) {
         rateLimit(sseOpenTimes, MAX_SSE_OPENS_PER_WINDOW, 'MCP server reopened the event stream too frequently')
       }
       if (operation && accept.includes('text/event-stream')) {
@@ -245,7 +251,7 @@ export class NotionBridge {
       check()
       this.#status = 'connecting'
       this.#error = undefined
-      const client = new Client({ name: 'dsh-notion', version: '0.1.5' }, { jsonSchemaValidator: deferredOutputValidation })
+      const client = new Client({ name: 'dsh-notion', version: '0.1.6' }, { jsonSchemaValidator: deferredOutputValidation })
       client.onclose = () => { if (this.#client === client) this.#breakGeneration(generation, new Error('MCP connection closed')) }
       client.onerror = (error) => { if (this.#client === client && this.#status === 'ready' && this.#isConnectionFailure(error)) this.#breakGeneration(generation, error) }
       const transport = new StreamableHTTPClientTransport(new URL(this.#options.url), { authProvider: provider, fetch })
@@ -422,7 +428,8 @@ export class NotionBridge {
   }
   #isConnectionFailure(error: Error): boolean {
     return error instanceof TypeError || error instanceof UnauthorizedError || error instanceof StreamableHTTPError ||
-      (error instanceof McpError && error.code === ErrorCode.ConnectionClosed)
+      (error instanceof McpError && error.code === ErrorCode.ConnectionClosed) ||
+      error.message.startsWith('Maximum reconnection attempts (')
   }
   async #request<T>(client: Client, signal: AbortSignal, action: () => Promise<T>): Promise<T> {
     const operation: OperationContext = {}

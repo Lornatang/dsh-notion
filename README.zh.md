@@ -34,6 +34,8 @@ dsh plugin --profile <name> add @lornatang/dsh-notion
 dsh plugin --profile <name> remove @lornatang/dsh-notion
 ```
 
+安装仅发布到 GitHub 的 0.1.6 版本，请运行 `dsh plugin --profile <name> add https://github.com/Lornatang/dsh-notion/releases/download/v0.1.6/lornatang-dsh-notion-0.1.6.tgz`。npm 仓库中的版本可能较旧。
+
 `add` 命令把 bundle 组合进 profile：profile 的 `cordis.patch.yml` 增加一条 insert 行，行 id 为 `notion`，其 `config` 从 `serverName: notion`、`url: https://mcp.notion.com/mcp`、`redirectPort: 3335` 和 `autoOpenBrowser: false` 开始。该行没有写 `toolCallTimeoutMs` 和 `authorizationTimeoutMs`，因此这两个字段采用 schema 默认值 60000 ms 和 300000 ms。`package.json` 通过 `dsh.bundle.patch` 声明这个文件，同一清单还声明了渲染设置页面的客户端入口。
 
 `add` 或 `remove` 之后重启 DSH：行在 profile 加载时组合，桥接随行一起启动。在 Web profile 中打开 设置 → Notion，页面显示连接状态，并驱动注册工具的那个桥接。

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.6 - 2026-11-15
+
+- Retry a failed OAuth callback bind when connecting again after the port becomes available.
+- Keep long-lived event streams open beyond the tool-call timeout and report terminal reconnection failures.
+- Include a GitHub release archive; npm is not published for this release.
+
 ## 0.1.5 - 2026-11-15
 
 - Rewrite the README to the package-bundle documentation convention and add a

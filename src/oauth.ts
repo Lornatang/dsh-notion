@@ -48,6 +48,7 @@ export class CallbackServer {
   #pending?: Pending
 
   get redirectUri(): string { return `http://127.0.0.1:${this.#port}/callback` }
+  get listening(): boolean { return this.#server !== undefined }
 
   async listen(preferredPort: number): Promise<number> {
     if (this.#server) return this.#port

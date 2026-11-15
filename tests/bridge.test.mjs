@@ -93,6 +93,60 @@ test('a busy configured callback port preserves existing credentials', async () 
   }
 })
 
+test('authorization retries a callback port after it becomes available', async () => {
+  const blocker = createServer()
+  await new Promise((resolve) => blocker.listen(0, '127.0.0.1', resolve))
+  const port = blocker.address().port
+  const mock = await startMockMcp({ oauth: true })
+  const root = await mkdtemp(join(tmpdir(), 'notion-port-retry-'))
+  const file = join(root, 'session.json')
+  const bridge = new NotionBridge(makeHost(), { ...options(mock, file), redirectPort: port })
+  try {
+    await assert.rejects(bridge.start(), { code: 'EADDRINUSE' })
+    await assert.rejects(bridge.authorize(), { code: 'EADDRINUSE' })
+    await new Promise((resolve) => blocker.close(resolve))
+    await bridge.authorize()
+    await waitFor(() => bridge.snapshot().status === 'authorizing')
+    const authorizationUrl = new URL(bridge.snapshot().authorizationUrl)
+    assert.equal(new URL(authorizationUrl.searchParams.get('redirect_uri')).port, String(port))
+    assert.equal((await fetch(authorizationUrl)).status, 200)
+    await waitFor(() => bridge.snapshot().status === 'ready')
+  } finally {
+    await bridge.dispose(); await mock.close()
+    if (blocker.listening) await new Promise((resolve) => blocker.close(resolve))
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('the server event stream survives the tool-call deadline', async () => {
+  const mock = await startMockMcp({ streamMode: 'hold' })
+  const root = await mkdtemp(join(tmpdir(), 'notion-stream-lifetime-'))
+  const host = makeHost()
+  const bridge = new NotionBridge(host, { ...options(mock, join(root, 'session.json')), toolCallTimeoutMs: 600 })
+  try {
+    await bridge.start()
+    await waitFor(() => bridge.snapshot().status === 'ready' && mock.streams() === 1)
+    await delay(1800)
+    assert.equal(mock.streams(), 1)
+    assert.equal(bridge.snapshot().status, 'ready')
+    const result = await host.tools.get('mcp__notion__notion-search').execute({ query: 'plans' }, {})
+    assert.match(result.content[0].text, /Mock Notion page/)
+  } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('failed event-stream reconnection exposes an error state', async () => {
+  const mock = await startMockMcp({ streamMode: 'exhaust' })
+  const root = await mkdtemp(join(tmpdir(), 'notion-stream-exhaust-'))
+  const host = makeHost()
+  const bridge = new NotionBridge(host, options(mock, join(root, 'session.json')))
+  try {
+    await bridge.start()
+    await waitFor(() => bridge.snapshot().status === 'error')
+    assert.match(bridge.snapshot().error, /Failed to open SSE stream|Maximum reconnection attempts/)
+    assert.equal(host.tools.size, 0)
+  } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
+})
+
 test('registers Notion tools and MCP resources, then removes all on disconnect', async () => {
   const mock = await startMockMcp()
   const root = await mkdtemp(join(tmpdir(), 'notion-bridge-'))

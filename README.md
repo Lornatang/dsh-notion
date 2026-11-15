@@ -34,6 +34,8 @@ dsh plugin --profile <name> add @lornatang/dsh-notion
 dsh plugin --profile <name> remove @lornatang/dsh-notion
 ```
 
+For the GitHub-only 0.1.6 release, use `dsh plugin --profile <name> add https://github.com/Lornatang/dsh-notion/releases/download/v0.1.6/lornatang-dsh-notion-0.1.6.tgz`. The npm registry version may be older.
+
 The `add` command composes the bundle into the profile: its `cordis.patch.yml` gains an insert entry, row id `notion`, whose `config` starts from `serverName: notion`, `url: https://mcp.notion.com/mcp`, `redirectPort: 3335` and `autoOpenBrowser: false`. The row leaves `toolCallTimeoutMs` and `authorizationTimeoutMs` out, so those two fields take the schema defaults of 60000 ms and 300000 ms. `package.json` declares this file through `dsh.bundle.patch`, and the same manifest declares the client entry that renders the settings page.
 
 Restart DSH after `add` or `remove`: the row is composed when the profile loads, and the bridge starts with it. In a Web profile, open Settings → Notion; the page reports the connection state and drives the same bridge that registers the tools.

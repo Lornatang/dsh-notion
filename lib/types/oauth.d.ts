@@ -24,6 +24,7 @@ export declare function createCloudFetch(serverUrl: URL, options?: {
 export declare class CallbackServer {
     #private;
     get redirectUri(): string;
+    get listening(): boolean;
     listen(preferredPort: number): Promise<number>;
     waitForCode(timeoutMs: number, state: string | undefined, signal?: AbortSignal): Promise<AuthorizationCallback>;
     cancelWait(): void;

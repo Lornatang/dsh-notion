@@ -66,7 +66,10 @@ export async function startMockMcp({ initializeDelay = 0, oauth = false, tokenEn
     }
     if (path === '/mcp' && req.method === 'GET' && streamMode) {
       streams++
+      if (streamMode === 'exhaust' && streams > 1) { json({ error: 'unavailable' }, 503); return }
       res.writeHead(200, { 'content-type': 'text/event-stream' })
+      if (streamMode === 'exhaust') { res.end('retry: 10\n\n'); return }
+      if (streamMode === 'hold') { res.write(': connected\n\n'); return }
       if (streamMode === 'reconnect') { res.end('retry: 0\n\n'); return }
       if (streamMode === 'flood') {
         for (let i = 0; i < 80; i++) res.write(`data: ${JSON.stringify({ jsonrpc: '2.0', id: `server-${i}`, method: 'ping' })}\n\n`)

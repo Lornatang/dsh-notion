@@ -11,6 +11,9 @@ import { startMockMcp } from '../tests/mock-mcp.mjs'
 import { verifyBrowser } from './browser-smoke.mjs'
 
 const run = promisify(execFile)
+const runNpm = (args, options) => process.env.npm_execpath
+  ? run(process.execPath, [process.env.npm_execpath, ...args], options)
+  : run('npm', args, options)
 const root = fileURLToPath(new URL('..', import.meta.url))
 const temp = await mkdtemp(join(tmpdir(), 'notion-dsh-integration-'))
 const home = join(temp, 'home')
@@ -27,7 +30,9 @@ try {
   assert.ok(version, 'DSH did not report its version')
   await run(dsh, ['--profile', 'notion-test', '--from-default-profile', 'web', '--dump-config'], { env, cwd: temp, timeout: 60000, maxBuffer: 1024 * 1024 })
   const profile = join(dshHome, 'profiles', 'notion-test')
-  const packed = JSON.parse((await run('npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', temp], { cwd: root, env, timeout: 30000 })).stdout)[0]
+  const packageOutput = JSON.parse((await runNpm(['pack', '--ignore-scripts', '--json', '--pack-destination', temp], { cwd: root, env, timeout: 30000 })).stdout)
+  const packed = Array.isArray(packageOutput) ? packageOutput[0] : Object.values(packageOutput)[0]
+  assert.ok(packed?.filename, 'npm pack did not return a package')
   await run(dsh, ['plugin', '--profile', 'notion-test', 'add', join(temp, packed.filename), '--registry=https://registry.npmjs.org/'], { env, cwd: temp, timeout: 240000, maxBuffer: 1024 * 1024 })
   const installed = JSON.parse(await readFile(join(profile, 'node_modules', '@lornatang', 'dsh-notion', 'package.json'), 'utf8'))
   const expected = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
