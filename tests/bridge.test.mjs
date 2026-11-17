@@ -489,3 +489,71 @@ test('validates structured results from every tool page and preserves tool error
     }
   } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
 })
+
+test('SSE comment floods are rate limited like data events', async () => {
+  const mock = await startMockMcp({ streamMode: 'comments' })
+  const root = await mkdtemp(join(tmpdir(), 'notion-comment-flood-'))
+  const host = makeHost()
+  const bridge = new NotionBridge(host, options(mock, join(root, 'session.json')))
+  try {
+    await bridge.start()
+    await waitFor(() => bridge.snapshot().status === 'error')
+    assert.match(bridge.snapshot().error, /sent too many events/)
+    assert.equal(host.tools.size, 0)
+  } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('the MCP client identifies itself with the package version', async () => {
+  const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
+  const mock = await startMockMcp()
+  const root = await mkdtemp(join(tmpdir(), 'notion-client-version-'))
+  const host = makeHost()
+  const bridge = new NotionBridge(host, options(mock, join(root, 'session.json')))
+  try {
+    await bridge.start()
+    await waitFor(() => bridge.snapshot().status === 'ready')
+    const initialize = mock.calls.find((call) => call.method === 'initialize')
+    assert.equal(initialize.params.clientInfo.name, 'dsh-notion')
+    assert.equal(initialize.params.clientInfo.version, pkg.version)
+  } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+function throwingHost() {
+  const host = makeHost()
+  const register = host.register
+  host.register = (definition) => {
+    const dispose = register(definition)
+    return () => { dispose(); throw new Error('dispose exploded') }
+  }
+  return host
+}
+
+test('disconnect removes every tool even when a dispose callback throws', async () => {
+  const mock = await startMockMcp()
+  const root = await mkdtemp(join(tmpdir(), 'notion-throwing-dispose-'))
+  const host = throwingHost()
+  const bridge = new NotionBridge(host, options(mock, join(root, 'session.json')))
+  try {
+    await bridge.start()
+    await waitFor(() => bridge.snapshot().status === 'ready')
+    assert.equal(host.tools.size, 5)
+    await bridge.disconnect()
+    assert.equal(host.tools.size, 0)
+    assert.equal(bridge.snapshot().status, 'idle')
+  } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('a connection failure with throwing disposes stays recoverable', async () => {
+  const mock = await startMockMcp({ conflict: true })
+  const root = await mkdtemp(join(tmpdir(), 'notion-throwing-cleanup-'))
+  const host = throwingHost()
+  const bridge = new NotionBridge(host, options(mock, join(root, 'session.json')))
+  try {
+    await bridge.start()
+    await waitFor(() => bridge.snapshot().status === 'error')
+    assert.match(bridge.snapshot().error, /conflicts/)
+    assert.equal(host.tools.size, 0)
+    await bridge.disconnect()
+    assert.equal(bridge.snapshot().status, 'idle')
+  } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
+})

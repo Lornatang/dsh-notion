@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto'
+import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { createServer, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js'
@@ -42,6 +42,15 @@ export function createCloudFetch(serverUrl: URL, options: { maxResponseBytes?: n
 
 type Pending = { state: string; complete: (value: AuthorizationCallback | Error) => void }
 
+// Constant-time comparison so a local attacker cannot probe the pending
+// OAuth state byte by byte through response timing.
+function stateMatches(candidate: string | null, expected: string): boolean {
+  if (candidate === null) return false
+  const left = Buffer.from(candidate, 'utf8')
+  const right = Buffer.from(expected, 'utf8')
+  return left.length === right.length && timingSafeEqual(left, right)
+}
+
 export class CallbackServer {
   #server?: Server
   #port = 0
@@ -58,7 +67,7 @@ export class CallbackServer {
       if (req.method !== 'GET' || url.pathname !== '/callback') { res.writeHead(404).end(); return }
       const pending = this.#pending
       const state = url.searchParams.get('state')
-      if (!pending || state !== pending.state) { this.#reply(res, false, 'Authorization state is invalid or expired.'); return }
+      if (!pending || state === null || !stateMatches(state, pending.state)) { this.#reply(res, false, 'Authorization state is invalid or expired.'); return }
       const error = url.searchParams.get('error')
       if (error) {
         const detail = url.searchParams.get('error_description') || error
@@ -71,6 +80,12 @@ export class CallbackServer {
       this.#reply(res, true, 'Authorization complete. Return to DSH.')
       pending.complete({ code, state })
     })
+    // The callback only ever needs one short GET; bound slow or abusive
+    // local connections instead of letting them pile up for the session.
+    server.maxConnections = 64
+    server.headersTimeout = 10_000
+    server.requestTimeout = 15_000
+    server.keepAliveTimeout = 5_000
     const bind = (port: number): Promise<number> => new Promise((resolve, reject) => {
       const failed = (error: Error): void => reject(error)
       server.once('error', failed)

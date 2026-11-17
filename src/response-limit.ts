@@ -15,34 +15,53 @@ function limitStream(body: ReadableStream<Uint8Array>, maxBytes: number, events:
       if (events) {
         // SSE events end at a blank line. Handle CR, LF and CRLF, including
         // separators split across network chunks, without buffering an event.
-        for (const byte of chunk) {
+        // Comment (keepalive) lines do not count toward the per-event byte
+        // budget, but they DO count as events: otherwise a server could flood
+        // bare ": ..." lines forever, bypassing both the byte and rate limits.
+        let index = 0
+        while (index < chunk.length) {
+          const byte = chunk[index]!
           if (byte === 10 && previousCR) {
             previousCR = false
             if (!discardFollowingLF && ++size > maxBytes) { onLimit(); throw new Error('notion: MCP response exceeds the byte limit') }
             lineStartSize = size
+            index++
+            continue
+          }
+          if (byte !== 13 && byte !== 10) {
+            // Fast path: skip whole runs of ordinary bytes with native scans
+            // instead of a per-byte loop, preserving the exact accounting.
+            let next = chunk.indexOf(13, index + 1)
+            const lf = chunk.indexOf(10, index + 1)
+            if (lf !== -1 && (next === -1 || lf < next)) next = lf
+            const end = next === -1 ? chunk.length : next
+            const run = end - index
+            if (lineSize === 0) comment = byte === 58
+            lineSize += run
+            size += run
+            if (size > maxBytes) { onLimit(); throw new Error('notion: MCP response exceeds the byte limit') }
+            previousCR = false
+            index = end
             continue
           }
           if (++size > maxBytes) { onLimit(); throw new Error('notion: MCP response exceeds the byte limit') }
           if (byte === 13) {
             discardFollowingLF = lineSize === 0 || comment
             if (lineSize === 0) { onEvent?.(); size = 0 }
-            else if (comment) size = lineStartSize
+            else if (comment) { size = lineStartSize; onEvent?.() }
             lineSize = 0
             comment = false
             lineStartSize = size
             previousCR = true
-          } else if (byte === 10) {
+          } else {
             if (lineSize === 0) { onEvent?.(); size = 0 }
-            else if (comment) size = lineStartSize
+            else if (comment) { size = lineStartSize; onEvent?.() }
             lineSize = 0
             comment = false
             lineStartSize = size
             previousCR = false
-          } else {
-            if (lineSize === 0) comment = byte === 58
-            lineSize++
-            previousCR = false
           }
+          index++
         }
       } else {
         size += chunk.byteLength

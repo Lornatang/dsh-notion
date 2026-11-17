@@ -79,6 +79,10 @@ export async function startMockMcp({ initializeDelay = 0, oauth = false, tokenEn
         res.write('data: {"jsonrpc":"2.0","method":"notifications/test"}\n\n'.repeat(1100))
         return
       }
+      if (streamMode === 'comments') {
+        res.write(': keepalive\n'.repeat(1100))
+        return
+      }
     }
     if (req.method === 'DELETE') { res.writeHead(204).end(); return }
     if (req.method !== 'POST') { res.writeHead(405).end(); return }

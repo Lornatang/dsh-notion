@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
+import { createRequire } from 'node:module'
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { setTimeout as delay } from 'node:timers/promises'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { UnauthorizedError, auth } from '@modelcontextprotocol/sdk/client/auth.js'
@@ -12,6 +12,8 @@ import type { OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js'
 import { openInBrowser } from './open-url.js'
 import type { SessionStore } from './store.js'
 import { deferredOutputValidation, validateOutput } from './output-validator.js'
+
+const packageVersion = (createRequire(import.meta.url)('../package.json') as { version: string }).version
 
 const MAX_DISCOVERY_BYTES = 8 * 1024 * 1024
 const MAX_SERVER_RESPONSES = 32
@@ -81,6 +83,7 @@ export class NotionBridge {
   #generation = 0
   #disposed = false
   #controller = new AbortController()
+  #waiters = new Set<() => void>()
 
   constructor(host: BridgeHost, options: BridgeOptions) {
     this.#host = host
@@ -92,13 +95,31 @@ export class NotionBridge {
     return { status: this.#status, authorizationUrl: this.#url, toolCount: this.#tools.size, error: this.#error }
   }
 
+  #setStatus(status: BridgeStatus): void { this.#status = status; this.#notify() }
+  #setUrl(url: string | undefined): void { this.#url = url; this.#notify() }
+  #notify(): void { for (const wake of [...this.#waiters]) wake() }
+  // Event-driven replacement for fixed-interval polling: resolves as soon as
+  // the predicate holds, or when the deadline passes, whichever comes first.
+  async #waitState(predicate: () => boolean, timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (!predicate()) {
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) return
+      await new Promise<void>((resolve) => {
+        const finish = (): void => { clearTimeout(timer); this.#waiters.delete(finish); resolve() }
+        const timer = setTimeout(finish, remaining)
+        this.#waiters.add(finish)
+      })
+    }
+  }
+
   async start(): Promise<void> {
     if (this.#disconnect) await this.#disconnect
     if (this.#disposed) return
     if (this.#boot) return this.#boot
     const generation = this.#generation
     const boot = (async () => {
-      this.#status = 'connecting'
+      this.#setStatus('connecting')
       await this.#options.store.load()
       if (this.#disposed || generation !== this.#generation) return
       await this.#callback.listen(this.#options.redirectPort)
@@ -109,12 +130,12 @@ export class NotionBridge {
       await this.#options.store.patch({ redirectUri: actual })
       if (this.#disposed || generation !== this.#generation) return
       this.#launch(false, generation)
-      for (let i = 0; i < 600 && this.#status === 'connecting'; i++) await delay(25)
+      await this.#waitState(() => this.#status !== 'connecting', 15_000)
     })()
     this.#boot = boot
     try { await boot } catch (error) {
       if (!this.#disposed && generation === this.#generation) {
-        this.#status = 'error'
+        this.#setStatus('error')
         this.#error = error instanceof Error ? error.message : String(error)
       }
       throw error
@@ -135,12 +156,15 @@ export class NotionBridge {
       return this.snapshot()
     }
     if (!this.#work) {
-      this.#status = 'connecting'
+      this.#setStatus('connecting')
       this.#error = undefined
-      this.#url = undefined
+      this.#setUrl(undefined)
       this.#launch(true, this.#generation, true)
     }
-    for (let i = 0; i < 800 && this.#status === 'connecting' && !this.#url; i++) await delay(25)
+    // Wait for a reportable state: the authorization URL is published while
+    // the status is still 'connecting', so waking on the URL alone would
+    // return a mid-transition snapshot to concurrent callers.
+    await this.#waitState(() => this.#status !== 'connecting', 20_000)
     return this.snapshot()
   }
 
@@ -153,17 +177,23 @@ export class NotionBridge {
       }
       await this.#operation.run({}, () => this.#connect(open, generation))
     })().catch(async (error: unknown) => {
-      if (!this.#disposed && generation === this.#generation) {
-        this.#status = 'error'
-        this.#url = undefined
-        this.#error = error instanceof Error ? error.message : String(error)
-        this.#host.logger.error(`notion: ${this.#error}`)
-        await this.#closeClient()
-        this.#clearTools()
+      try {
+        if (!this.#disposed && generation === this.#generation) {
+          this.#setStatus('error')
+          this.#setUrl(undefined)
+          this.#error = error instanceof Error ? error.message : String(error)
+          this.#host.logger.error(`notion: ${this.#error}`)
+          await this.#closeClient()
+          this.#clearTools()
+        }
+      } catch (cleanupError) {
+        // A throwing host hook must never become an unhandled rejection that
+        // crashes the DSH process, nor break disconnect/dispose awaiting #work.
+        try { this.#host.logger.error(`notion: connection cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`) } catch { /* logger unavailable */ }
       }
     })
     this.#work = work
-    void work.finally(() => { if (this.#work === work) this.#work = undefined })
+    void work.finally(() => { if (this.#work === work) this.#work = undefined }).catch(() => undefined)
   }
 
   async #connect(open: boolean, generation: number): Promise<void> {
@@ -242,16 +272,16 @@ export class NotionBridge {
     }
     const provider = new NotionOAuthProvider({
       store: this.#options.store, redirectUri: () => this.#callback.redirectUri, allowLoopbackHttp, serverOrigin: serverUrl.origin,
-      logger: this.#host.logger, active, onAuthorizationUrl: (url) => { if (active()) this.#url = url },
+      logger: this.#host.logger, active, onAuthorizationUrl: (url) => { if (active()) this.#setUrl(url) },
       tokenRead: (tokens) => { const operation = this.#operation.getStore(); if (operation && !operation.observedTokens) operation.observedTokens = tokens },
       refreshExpected: () => this.#operation.getStore()?.refreshExpected,
       authFinished: () => { const operation = this.#operation.getStore(); operation?.releaseRefresh?.(); if (operation) operation.refreshExpected = undefined },
     })
     for (let attempt = 0; attempt < 2; attempt++) {
       check()
-      this.#status = 'connecting'
+      this.#setStatus('connecting')
       this.#error = undefined
-      const client = new Client({ name: 'dsh-notion', version: '0.1.6' }, { jsonSchemaValidator: deferredOutputValidation })
+      const client = new Client({ name: 'dsh-notion', version: packageVersion }, { jsonSchemaValidator: deferredOutputValidation })
       client.onclose = () => { if (this.#client === client) this.#breakGeneration(generation, new Error('MCP connection closed')) }
       client.onerror = (error) => { if (this.#client === client && this.#status === 'ready' && this.#isConnectionFailure(error)) this.#breakGeneration(generation, error) }
       const transport = new StreamableHTTPClientTransport(new URL(this.#options.url), { authProvider: provider, fetch })
@@ -274,7 +304,7 @@ export class NotionBridge {
         if (!(error instanceof UnauthorizedError) || attempt !== 0) throw error
         const state = this.#url ? new URL(this.#url).searchParams.get('state') ?? undefined : undefined
         const waiting = this.#callback.waitForCode(this.#options.authorizationTimeoutMs, state, signal)
-        this.#status = 'authorizing'
+        this.#setStatus('authorizing')
         if (open && this.#url && this.#options.autoOpenBrowser) void openInBrowser(this.#url)
         const callback = await waiting
         check()
@@ -286,8 +316,8 @@ export class NotionBridge {
       this.#client = client
       await this.#registerTools(client, signal)
       check()
-      this.#url = undefined
-      this.#status = 'ready'
+      this.#setUrl(undefined)
+      this.#setStatus('ready')
       return
     }
     throw new Error('Notion authorization did not establish a connection')
@@ -387,7 +417,7 @@ export class NotionBridge {
   }
   async #disconnectNow(): Promise<void> {
     this.#generation++
-    this.#status = 'idle'
+    this.#setStatus('idle')
     this.#controller.abort()
     this.#callback.cancelWait()
     await this.#boot?.catch(() => undefined)
@@ -398,7 +428,7 @@ export class NotionBridge {
     try { await this.#options.store.destroy() }
     finally {
       this.#controller = new AbortController()
-      this.#url = undefined
+      this.#setUrl(undefined)
       this.#error = undefined
     }
   }
@@ -407,7 +437,7 @@ export class NotionBridge {
     this.#disposed = true
     await this.#disconnect
     this.#generation++
-    this.#status = 'idle'
+    this.#setStatus('idle')
     this.#controller.abort()
     this.#callback.cancelWait()
     await this.#boot?.catch(() => undefined)
@@ -423,8 +453,14 @@ export class NotionBridge {
     await client?.close().catch(() => undefined)
   }
   #clearTools(): void {
-    for (const value of this.#tools.values()) value.dispose()
+    let failure: unknown
+    for (const value of this.#tools.values()) {
+      try { value.dispose() } catch (error) { failure ??= error }
+    }
     this.#tools.clear()
+    if (failure !== undefined) {
+      try { this.#host.logger.error(`notion: tool cleanup failed: ${failure instanceof Error ? failure.message : String(failure)}`) } catch { /* logger unavailable */ }
+    }
   }
   #isConnectionFailure(error: Error): boolean {
     return error instanceof TypeError || error instanceof UnauthorizedError || error instanceof StreamableHTTPError ||
@@ -447,9 +483,9 @@ export class NotionBridge {
     this.#controller.abort()
     this.#controller = new AbortController()
     this.#callback.cancelWait()
-    this.#status = 'error'
+    this.#setStatus('error')
     this.#error = error.message
-    this.#url = undefined
+    this.#setUrl(undefined)
     this.#clearTools()
     void this.#closeClient()
   }

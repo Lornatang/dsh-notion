@@ -30,8 +30,12 @@ const text = {
 }
 
 async function api(path: string, method: 'GET' | 'POST' = 'GET'): Promise<Snapshot> {
-  const response = await fetch(prefix + path, { method, cache: 'no-store' })
-  const value = await response.json() as Snapshot
+  // A hung request must not leave the panel busy forever; connect can take
+  // longer than a status read while the callback port is being rebound.
+  const response = await fetch(prefix + path, { method, cache: 'no-store', signal: AbortSignal.timeout(method === 'GET' ? 10_000 : 30_000) })
+  let value: Snapshot
+  try { value = await response.json() as Snapshot } catch { throw new Error(`HTTP ${String(response.status)}`) }
+  if (!value || typeof value !== 'object') throw new Error(`HTTP ${String(response.status)}`)
   if (!response.ok || !value.ok) throw new Error(value.error || `HTTP ${String(response.status)}`)
   return value
 }
@@ -44,14 +48,32 @@ export function NotionSettings(): React.ReactElement {
     try { setSnapshot(await api('/status')); setError('') }
     catch (err) { setError(err instanceof Error ? err.message : String(err)) }
   }, [])
-  React.useEffect(() => { void refresh(); const timer = window.setInterval(() => { void refresh() }, 3000); return () => window.clearInterval(timer) }, [refresh])
+  const status = snapshot?.status ?? 'loading'
+  // Poll fast only while a connection is being established, back off once the
+  // state is stable, and stop entirely while the tab is hidden.
+  React.useEffect(() => {
+    let timer = 0
+    let stopped = false
+    let running = false
+    const active = status === 'loading' || status === 'connecting' || status === 'authorizing'
+    const schedule = (): void => { timer = window.setTimeout(() => { void tick() }, active ? 3000 : 15_000) }
+    const tick = async (): Promise<void> => {
+      if (stopped || running || document.hidden) return
+      running = true
+      try { await refresh() } finally { running = false }
+      if (!stopped && !document.hidden) schedule()
+    }
+    const visible = (): void => { if (!stopped && !document.hidden) { window.clearTimeout(timer); void tick() } }
+    document.addEventListener('visibilitychange', visible)
+    void tick()
+    return () => { stopped = true; window.clearTimeout(timer); document.removeEventListener('visibilitychange', visible) }
+  }, [refresh, status])
   const act = async (action: 'connect' | 'disconnect'): Promise<void> => {
     setBusy(true); setError('')
     try { setSnapshot(await api(`/${action}`, 'POST')) }
     catch (err) { setError(err instanceof Error ? err.message : String(err)) }
     finally { setBusy(false) }
   }
-  const status = snapshot?.status ?? 'loading'
   const labels = { loading: text.loading, idle: text.idle, connecting: text.connecting, authorizing: text.authorizing, ready: text.ready, error: text.error }
   return h('div', { className: 'dsn-root', 'data-dsh-notion-settings': '' },
     h('header', { className: 'dsn-head' }, h('div', { className: 'dsn-logo', 'aria-hidden': true }, 'N'),

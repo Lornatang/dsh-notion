@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.7 - 2026-11-17
+
+- Reuse a bounded pool of validation workers instead of spawning one per tool call; warm structured-output validation drops from ~33 ms to ~0.04 ms. Compiled schemas are cached per worker with fresh validator instances so schemas sharing an `$id` stay isolated.
+- Count SSE comment (keepalive) lines as events so comment floods can no longer bypass the byte and rate limits, and skip ordinary byte runs with native scans while preserving exact per-event accounting.
+- Replace fixed-interval status polling with event-driven waits in the bridge; the settings panel polls adaptively, pauses while hidden, and times out hung API requests.
+- Harden the OAuth callback server with connection and timeout bounds and compare callback state in constant time.
+- Survive throwing tool-dispose hooks during connection cleanup without unhandled rejections, and report the real package version in the MCP client identity.
+
 ## 0.1.6 - 2026-11-15
 
 - Retry a failed OAuth callback bind when connecting again after the port becomes available.

@@ -9,7 +9,7 @@ import { test } from 'node:test'
 import { gzipSync } from 'node:zlib'
 import { CallbackServer, createCloudFetch } from '../lib/oauth.js'
 import { limitResponse } from '../lib/response-limit.js'
-import { validateOutput } from '../lib/output-validator.js'
+import { outputValidatorStats, validateOutput } from '../lib/output-validator.js'
 import { registerRoutes } from '../lib/routes.js'
 import { SessionStore, sessionFileFor } from '../lib/store.js'
 
@@ -230,4 +230,41 @@ test('pathological output regexes cannot block the host event loop', async () =>
   `
   const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', script], { timeout: 8000 })
   assert.match(stdout, /isolated/)
+})
+
+test('output validation reuses pooled workers across sequential calls', async () => {
+  const schema = { type: 'object', properties: { count: { type: 'integer', minimum: 1 } }, required: ['count'] }
+  const before = outputValidatorStats()
+  for (let index = 0; index < 5; index++) await validateOutput(schema, { count: index + 1 }, 2000)
+  const after = outputValidatorStats()
+  const spawned = after.spawned - before.spawned
+  const reused = after.reused - before.reused
+  assert.equal(spawned + reused, 5)
+  assert.ok(spawned <= 1, `expected at most one new worker, got ${spawned}`)
+})
+
+test('schemas sharing an $id are validated independently', async () => {
+  const shared = 'https://example.test/shared-schema.json'
+  const text = { $id: shared, type: 'object', properties: { value: { type: 'string', pattern: '^[A-Z]{2}$' } }, required: ['value'] }
+  const number = { $id: shared, type: 'object', properties: { value: { type: 'integer', minimum: 10 } }, required: ['value'] }
+  await validateOutput(text, { value: 'AB' }, 2000)
+  await assert.rejects(validateOutput(number, { value: 'AB' }, 2000), /must be integer/)
+  await validateOutput(number, { value: 42 }, 2000)
+  await assert.rejects(validateOutput(text, { value: 42 }, 2000), /must be string/)
+})
+
+test('a timed-out validation is replaced and later validations recover', async () => {
+  const evil = { type: 'object', properties: { text: { type: 'string', pattern: '^(a+)+$' } }, required: ['text'] }
+  await assert.rejects(validateOutput(evil, { text: 'a'.repeat(38) + '!' }, 1200), /timed out/)
+  await validateOutput({ type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'] }, { ok: true }, 2000)
+})
+
+test('concurrent validations stay within the worker bound', async () => {
+  const schema = { type: 'object', properties: { n: { type: 'integer', minimum: 0 } }, required: ['n'] }
+  const before = outputValidatorStats()
+  const results = await Promise.allSettled(Array.from({ length: 24 }, (_, index) => validateOutput(schema, { n: index }, 4000)))
+  assert.equal(results.filter((result) => result.status === 'fulfilled').length, 24)
+  const after = outputValidatorStats()
+  assert.ok(after.spawned - before.spawned <= 4)
+  assert.ok(after.idle <= 4)
 })
