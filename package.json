@@ -76,7 +76,7 @@
     "@deepseek-ai/dsh-tools": "0.2.2-rc.2",
     "@types/node": "^22.18.0",
     "@types/react": "^18.3.31",
-    "typescript": "^5.9.0"
+    "typescript": "^7.0.2"
   },
   "repository": {
     "type": "git",
