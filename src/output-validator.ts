@@ -42,8 +42,22 @@ function release(): void {
 // Validation workers are pooled: spawning a worker per tool call made every
 // structured result pay the full SDK + AJV module-load cost again. Idle
 // workers are unref'd and reaped so they never keep the host process alive.
+// Schema objects are stable for the lifetime of a discovered tool. A numeric id
+// lets a warm worker reuse the compiled validator without re-sending (and
+// structured-cloning) the schema on every call.
+const schemaIds = new WeakMap<object, number>()
+let nextSchemaId = 1
+function schemaIdOf(schema: unknown): number | undefined {
+  if (typeof schema !== 'object' || schema === null) return undefined
+  const known = schemaIds.get(schema)
+  if (known !== undefined) return known
+  const id = nextSchemaId++
+  schemaIds.set(schema, id)
+  return id
+}
+
 type Job = { id: number; settle: (result: { valid: boolean; error?: string }) => void; fail: (error: Error) => void }
-type PooledWorker = { worker: Worker; ready: Promise<void>; job?: Job; dead: boolean; idleTimer?: ReturnType<typeof setTimeout> }
+type PooledWorker = { worker: Worker; ready: Promise<void>; job?: Job; dead: boolean; idleTimer?: ReturnType<typeof setTimeout>; schemas: Set<number>; pendingSchema?: number }
 const idle: PooledWorker[] = []
 let spawned = 0
 let reused = 0
@@ -73,13 +87,20 @@ function spawn(): PooledWorker {
   const ready = new Promise<void>((resolve, reject) => { readyResolve = resolve; readyReject = reject })
   // A worker can die while idle, before anyone awaits readiness again.
   ready.catch(() => {})
-  const entry: PooledWorker = { worker, ready, dead: false }
-  worker.on('message', (message: { type?: string; id?: number; valid?: boolean; error?: string }) => {
+  const entry: PooledWorker = { worker, ready, dead: false, schemas: new Set() }
+  worker.on('message', (message: { type?: string; id?: number; valid?: boolean; error?: string; retire?: boolean; cached?: boolean }) => {
     if (message?.type === 'ready') { readyResolve(); return }
     if (message?.type === 'result' && entry.job && message.id === entry.job.id) {
       const job = entry.job
       entry.job = undefined
+      // Only acknowledge the schema after the worker reports it compiled it;
+      // a malformed schema must stay a cache miss, not turn into a lost schema.
+      if (message.cached === true && entry.pendingSchema !== undefined) entry.schemas.add(entry.pendingSchema)
+      entry.pendingSchema = undefined
       job.settle({ valid: message.valid === true, error: message.error })
+      // A worker that filled its schema cache must not receive an uncached
+      // schema later; recycling it keeps the host's per-worker cache view exact.
+      if (message.retire === true) retire(entry)
     }
   })
   const die = (error: Error): void => {
@@ -116,9 +137,13 @@ function park(entry: PooledWorker): void {
 }
 
 export async function validateOutput(schema: unknown, value: unknown, timeoutMs: number, signal?: AbortSignal): Promise<void> {
+  // Queue wait is bounded separately, so the validation timeout measures only
+  // worker work; a queued caller is still released by its cancellation signal.
+  const queueTimeout = AbortSignal.timeout(Math.min(timeoutMs, 5000))
+  const queueSignal = signal ? AbortSignal.any([signal, queueTimeout]) : queueTimeout
+  await acquire(queueSignal)
   const timeout = AbortSignal.timeout(Math.min(timeoutMs, 5000))
   const combined = signal ? AbortSignal.any([signal, timeout]) : timeout
-  await acquire(combined)
   try {
     if (combined.aborted) throw new Error('notion: output validation timed out or was cancelled')
     const entry = take()
@@ -147,7 +172,13 @@ export async function validateOutput(schema: unknown, value: unknown, timeoutMs:
         entry.job = { id, settle, fail }
         combined.addEventListener('abort', abort, { once: true })
         if (combined.aborted) { abort(); return }
-        entry.worker.postMessage({ type: 'validate', id, schema, value })
+        // Send the schema only when this worker has not compiled it yet.
+        const schemaId = schemaIdOf(schema)
+        const cached = schemaId !== undefined && entry.schemas.has(schemaId)
+        entry.pendingSchema = schemaId
+        entry.worker.postMessage(cached
+          ? { type: 'validate', id, schemaId, value }
+          : { type: 'validate', id, schemaId, schema, value })
       })
     } catch (error) {
       retire(entry)

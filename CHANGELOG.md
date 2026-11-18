@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.10 - 2026-11-19
+
+- Assign stable ids to output schemas so warm validation workers skip re-sending and re-cloning an unchanged schema, and recycle a worker when its validator cache fills instead of forgetting compiled schemas.
+- Measure the output-validation timeout after a caller leaves the worker queue instead of before.
+
 ## 0.1.9 - 2026-11-19
 
 - Share one loopback-host predicate between the OAuth callback and the browser helper.
