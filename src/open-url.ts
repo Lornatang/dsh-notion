@@ -1,10 +1,11 @@
 import { spawn } from 'node:child_process'
+import { isLoopbackHost } from './oauth.js'
 
 /** Open a browser without invoking a shell. */
 export function openInBrowser(value: string): Promise<boolean> {
   let url: URL
   try { url = new URL(value) } catch { return Promise.resolve(false) }
-  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname))) {
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && isLoopbackHost(url.hostname))) {
     return Promise.resolve(false)
   }
   const command = process.platform === 'win32' ? 'rundll32.exe' : process.platform === 'darwin' ? 'open' : 'xdg-open'

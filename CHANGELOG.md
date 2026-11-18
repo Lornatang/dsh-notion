@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.9 - 2026-11-19
+
+- Share one loopback-host predicate between the OAuth callback and the browser helper.
+- Drop the OAuth provider unused logger option.
+
 ## 0.1.8 - 2026-11-18
 
 - Redact access tokens and bound their length before a connection error reaches the settings panel, and keep the rest of the dialog usable.

@@ -11,6 +11,8 @@ export interface AuthorizationCallback {
     code: string;
     state: string | undefined;
 }
+/** Loopback hosts may use plain HTTP for local MCP and OAuth endpoints. */
+export declare function isLoopbackHost(hostname: string): boolean;
 /** Restrict every discovered OAuth and MCP endpoint, including redirect targets. */
 export declare function createCloudFetch(serverUrl: URL, options?: {
     maxResponseBytes?: number;
@@ -38,7 +40,6 @@ export declare class NotionOAuthProvider implements OAuthClientProvider {
         onAuthorizationUrl: (url: string) => void;
         allowLoopbackHttp: boolean;
         serverOrigin: string;
-        logger: Logger;
         active?: () => boolean;
         tokenRead?: (value: OAuthTokens | undefined) => void;
         refreshExpected?: () => OAuthTokens | undefined;

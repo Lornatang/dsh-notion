@@ -279,7 +279,7 @@ export class NotionBridge {
     }
     const provider = new NotionOAuthProvider({
       store: this.#options.store, redirectUri: () => this.#callback.redirectUri, allowLoopbackHttp, serverOrigin: serverUrl.origin,
-      logger: this.#host.logger, active, onAuthorizationUrl: (url) => { if (active()) this.#setUrl(url) },
+      active, onAuthorizationUrl: (url) => { if (active()) this.#setUrl(url) },
       tokenRead: (tokens) => { const operation = this.#operation.getStore(); if (operation && !operation.observedTokens) operation.observedTokens = tokens },
       refreshExpected: () => this.#operation.getStore()?.refreshExpected,
       authFinished: () => { const operation = this.#operation.getStore(); operation?.releaseRefresh?.(); if (operation) operation.refreshExpected = undefined },
