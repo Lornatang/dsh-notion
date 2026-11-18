@@ -190,8 +190,9 @@ export class SessionStore {
       this.#value = { version: 1 }
       this.#key = undefined
       if (!process.env['DSH_NOTION_ENCRYPTION_KEY']) {
-        const entry = await this.#keyring()
-        await entry.deletePassword()
+        // The local file is already gone; a locked or unavailable keyring must
+        // not turn a successful disconnect into an error.
+        try { const entry = await this.#keyring(); await entry.deletePassword() } catch { /* best effort */ }
       }
     })
   }
@@ -210,6 +211,12 @@ export class SessionStore {
       const handle = await open(temporary, 'wx', 0o600)
       try { await handle.writeFile(`${JSON.stringify(envelope)}\n`, 'utf8'); await handle.sync() } finally { await handle.close() }
       await rename(temporary, this.#file)
+      // Persist the directory entry too; best effort where directories cannot
+      // be opened for fsync (Windows).
+      try {
+        const directory = await open(dirname(this.#file), 'r')
+        try { await directory.sync() } finally { await directory.close() }
+      } catch { /* best effort */ }
     } finally {
       await rm(temporary, { force: true })
     }
@@ -225,6 +232,11 @@ export class SessionStore {
   async #masterKey(create: boolean): Promise<Buffer> {
     if (this.#key) return this.#key
     const supplied = process.env['DSH_NOTION_ENCRYPTION_KEY']
+    // Validate an explicitly supplied key before touching the keyring so a
+    // malformed key is not misreported as unavailable key storage.
+    if (supplied !== undefined && (!/^[A-Za-z0-9+/]{43}=$/.test(supplied) || Buffer.from(supplied, 'base64').length !== 32)) {
+      throw new Error('notion: DSH_NOTION_ENCRYPTION_KEY must be standard Base64 for exactly 32 bytes')
+    }
     let encoded: string | null = supplied ?? null
     try {
       if (!encoded) {

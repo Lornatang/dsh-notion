@@ -34,7 +34,7 @@ dsh plugin --profile <name> add @lornatang/dsh-notion
 dsh plugin --profile <name> remove @lornatang/dsh-notion
 ```
 
-安装仅发布到 GitHub 的 0.1.6 版本，请运行 `dsh plugin --profile <name> add https://github.com/Lornatang/dsh-notion/releases/download/v0.1.6/lornatang-dsh-notion-0.1.6.tgz`。npm 仓库中的版本可能较旧。
+安装仅发布到 GitHub 的 0.1.8 版本，请运行 `dsh plugin --profile <name> add https://github.com/Lornatang/dsh-notion/releases/download/v0.1.8/lornatang-dsh-notion-0.1.8.tgz`。npm 仓库中的版本可能较旧。
 
 `add` 命令把 bundle 组合进 profile：profile 的 `cordis.patch.yml` 增加一条 insert 行，行 id 为 `notion`，其 `config` 从 `serverName: notion`、`url: https://mcp.notion.com/mcp`、`redirectPort: 3335` 和 `autoOpenBrowser: false` 开始。该行没有写 `toolCallTimeoutMs` 和 `authorizationTimeoutMs`，因此这两个字段采用 schema 默认值 60000 ms 和 300000 ms。`package.json` 通过 `dsh.bundle.patch` 声明这个文件，同一清单还声明了渲染设置页面的客户端入口。
 
@@ -167,13 +167,13 @@ bundle 在 `package.json` 中声明了两半：宿主入口由 `dsh.bundle.patch
 这些限制说明这一层何时不适用，以及它对周围 profile 的要求。
 
 - **每行一个连接** — 凭证文件以 `serverName` 和 URL 摘要为键，第二个连接需要另一行并给它自己的 `serverName`；两个值都相同的两行共享一份凭证。
-- **回调端口必须在启动时空闲** — 监听在连接前绑定 `127.0.0.1:<redirectPort>`，端口被占用会让该行停在 Connection failed；页面的 Connect 操作不会重新打开监听，恢复需要重启 DSH。
+- **回调端口必须在启动时空闲** — 监听在连接前绑定 `127.0.0.1:<redirectPort>`，端口被占用会让该行停在 Connection failed；页面的 Connect 操作会重试监听，端口持续被占用时仍需重启 DSH 才能恢复。
 - **回调 URL 必须保持稳定** — 修改 `redirectPort`，或让 `0` 选了另一个端口，都会让已保存的重定向 URI 失效，客户端注册、令牌和 PKCE verifier 被丢弃，需要重新授权。
 - **授权在五分钟后超时** — `authorizationTimeoutMs` 默认为 300000 ms；浏览器未在该窗口内返回时，本次尝试以 Connection failed 结束，Connect Notion 会开始新的尝试。
 - **凭证绑定 profile 路径与密钥** — 文件路径是认证数据，钥匙串条目以该路径的摘要为键，因此移动 profile 或修改 `DSH_NOTION_ENCRYPTION_KEY` 会让文件无法读取，且没有明文回退。
 - **无头主机需要自备密钥** — 没有已解锁的操作系统凭证库（Linux 上是 Secret Service）时，在 `DSH_NOTION_ENCRYPTION_KEY` 持有持久 Base64 32 字节密钥之前，每次连接都会失败；Windows 跳过模式与属主检查，因此 profile 目录需要 ACL。
 - **Disconnect 只在本地生效** — 它删除加密文件、钥匙串条目和已注册工具，但授权会留在 Notion 账号中，直到在 Notion 的连接设置里撤销。
-- **每个传输请求都带工具超时** — `toolCallTimeoutMs`（默认 60 秒）同样约束服务器打开的 GET event stream，本应保持更久的流会在该期限被关闭；十秒内超过八次这样的打开会让桥接降为 Connection failed。
+- **每次工具调用都带工具超时** — `toolCallTimeoutMs`（默认 60 秒）约束工具调用与发现请求，但不约束服务器打开的 GET event stream，该流会保持到连接关闭；十秒内超过八次这样的打开会让桥接降为 Connection failed。
 
 <a id="dev-note"></a>
 ### 开发者注记

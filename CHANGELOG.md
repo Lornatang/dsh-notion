@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.8 - 2026-11-18
+
+- Redact access tokens and bound their length before a connection error reaches the settings panel, and keep the rest of the dialog usable.
+- Answer malformed request targets with 400 and unexpected failures with a generic 500 instead of letting the request hang or leak internals.
+- Validate the encryption key as standard Base64 for exactly 32 bytes, and treat keyring deletion as best-effort so disconnect cannot fail on a missing entry.
+- Retry a failed MCP client initialization once instead of leaving the bridge unavailable until reconnect.
+- Reject invalid server names and MCP URLs at construction instead of failing later at the store or SDK boundary.
+- Reject `toolCallTimeoutMs` values above the 32-bit signed millisecond limit.
+- Fall back to a bounded message when a validation worker fails without an error string, and fsync the session directory after replacing the credential file.
+
 ## 0.1.7 - 2026-11-17
 
 - Reuse a bounded pool of validation workers instead of spawning one per tool call; warm structured-output validation drops from ~33 ms to ~0.04 ms. Compiled schemas are cached per worker with fresh validator instances so schemas sharing an `$id` stay isolated.

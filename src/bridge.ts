@@ -20,6 +20,7 @@ const MAX_SERVER_RESPONSES = 32
 const RATE_WINDOW_MS = 10_000
 const MAX_SSE_EVENTS_PER_WINDOW = 1000
 const MAX_SSE_OPENS_PER_WINDOW = 8
+const MAX_ERROR_CHARS = 300
 
 export interface BridgeHost { register(definition: ToolDefinition): () => void; logger: Logger }
 export interface BridgeOptions {
@@ -82,13 +83,17 @@ export class NotionBridge {
   #disconnect?: Promise<void>
   #generation = 0
   #disposed = false
+  #initialized = false
   #controller = new AbortController()
   #waiters = new Set<() => void>()
 
   constructor(host: BridgeHost, options: BridgeOptions) {
     this.#host = host
     this.#options = options
-    createCloudFetch(new URL(options.url))
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(options.serverName)) throw new Error('notion: serverName must contain only letters, numbers, underscores or hyphens')
+    try { createCloudFetch(new URL(options.url)) } catch (error) {
+      throw new Error('notion: invalid MCP server URL; expected an HTTPS URL without embedded credentials', { cause: error })
+    }
   }
 
   snapshot(): BridgeSnapshot {
@@ -128,6 +133,7 @@ export class NotionBridge {
       const actual = this.#callback.redirectUri
       if (previous && previous !== actual) await this.#options.store.clear('clientInformation', 'tokens', 'codeVerifier')
       await this.#options.store.patch({ redirectUri: actual })
+      this.#initialized = true
       if (this.#disposed || generation !== this.#generation) return
       this.#launch(false, generation)
       await this.#waitState(() => this.#status !== 'connecting', 15_000)
@@ -136,7 +142,7 @@ export class NotionBridge {
     try { await boot } catch (error) {
       if (!this.#disposed && generation === this.#generation) {
         this.#setStatus('error')
-        this.#error = error instanceof Error ? error.message : String(error)
+        this.#error = this.#errorText(error)
       }
       throw error
     } finally { if (this.#boot === boot) this.#boot = undefined }
@@ -148,8 +154,9 @@ export class NotionBridge {
     if (this.#boot) await this.#boot
     if (generation !== this.#generation || this.#disconnect) return this.snapshot()
     if (this.#disposed || this.#status === 'ready') return this.snapshot()
-    // A failed initial bind must be retried before the SDK registers a redirect URI.
-    if (!this.#callback.listening) await this.start()
+    // A failed initial bind or redirect-URI store write must be retried before
+    // the SDK registers a redirect URI.
+    if (!this.#callback.listening || !this.#initialized) await this.start()
     if (generation !== this.#generation || this.#disposed || this.#disconnect || this.snapshot().status === 'ready') return this.snapshot()
     if (this.#status === 'authorizing' && this.#url) {
       if (this.#options.autoOpenBrowser) await openInBrowser(this.#url)
@@ -181,7 +188,7 @@ export class NotionBridge {
         if (!this.#disposed && generation === this.#generation) {
           this.#setStatus('error')
           this.#setUrl(undefined)
-          this.#error = error instanceof Error ? error.message : String(error)
+          this.#error = this.#errorText(error)
           this.#host.logger.error(`notion: ${this.#error}`)
           await this.#closeClient()
           this.#clearTools()
@@ -427,6 +434,7 @@ export class NotionBridge {
     this.#clearTools()
     try { await this.#options.store.destroy() }
     finally {
+      this.#initialized = false
       this.#controller = new AbortController()
       this.#setUrl(undefined)
       this.#error = undefined
@@ -462,6 +470,16 @@ export class NotionBridge {
       try { this.#host.logger.error(`notion: tool cleanup failed: ${failure instanceof Error ? failure.message : String(failure)}`) } catch { /* logger unavailable */ }
     }
   }
+  #errorText(error: unknown): string {
+    let text = error instanceof Error ? error.message : String(error)
+    // Upstream error bodies are untrusted and may echo credentials; never log or
+    // expose them verbatim or unbounded.
+    const tokens = this.#options.store.current.tokens
+    for (const value of [tokens?.access_token, tokens?.refresh_token, tokens?.id_token]) {
+      if (typeof value === 'string' && value) text = text.split(value).join('[REDACTED]')
+    }
+    return text.length > MAX_ERROR_CHARS ? `${text.slice(0, MAX_ERROR_CHARS)}…` : text
+  }
   #isConnectionFailure(error: Error): boolean {
     return error instanceof TypeError || error instanceof UnauthorizedError || error instanceof StreamableHTTPError ||
       (error instanceof McpError && error.code === ErrorCode.ConnectionClosed) ||
@@ -484,7 +502,7 @@ export class NotionBridge {
     this.#controller = new AbortController()
     this.#callback.cancelWait()
     this.#setStatus('error')
-    this.#error = error.message
+    this.#error = this.#errorText(error)
     this.#setUrl(undefined)
     this.#clearTools()
     void this.#closeClient()

@@ -34,7 +34,7 @@ dsh plugin --profile <name> add @lornatang/dsh-notion
 dsh plugin --profile <name> remove @lornatang/dsh-notion
 ```
 
-For the GitHub-only 0.1.6 release, use `dsh plugin --profile <name> add https://github.com/Lornatang/dsh-notion/releases/download/v0.1.6/lornatang-dsh-notion-0.1.6.tgz`. The npm registry version may be older.
+For the GitHub-only 0.1.8 release, use `dsh plugin --profile <name> add https://github.com/Lornatang/dsh-notion/releases/download/v0.1.8/lornatang-dsh-notion-0.1.8.tgz`. The npm registry version may be older.
 
 The `add` command composes the bundle into the profile: its `cordis.patch.yml` gains an insert entry, row id `notion`, whose `config` starts from `serverName: notion`, `url: https://mcp.notion.com/mcp`, `redirectPort: 3335` and `autoOpenBrowser: false`. The row leaves `toolCallTimeoutMs` and `authorizationTimeoutMs` out, so those two fields take the schema defaults of 60000 ms and 300000 ms. `package.json` declares this file through `dsh.bundle.patch`, and the same manifest declares the client entry that renders the settings page.
 
@@ -167,13 +167,13 @@ Tool definitions belong to the request prefix, so connecting adds the schemas of
 These limits tell you when the layer does not fit and what it needs from the profile around it.
 
 - **One connection per row** — the credential file is keyed by `serverName` and the URL digest, so a second connection needs a second row with its own `serverName`; two rows that share both values share one grant.
-- **The callback port must be free at startup** — the listener binds `127.0.0.1:<redirectPort>` before connecting, and a taken port leaves the row at Connection failed; the page's Connect action does not re-open the listener, so recovery takes a DSH restart.
+- **The callback port must be free at startup** — the listener binds `127.0.0.1:<redirectPort>` before connecting, and a taken port leaves the row at Connection failed; the page's Connect action retries the listener, and if the port stays occupied recovery takes a DSH restart.
 - **The callback URL must stay stable** — a different effective port, from a changed `redirectPort` or from `0` picking another one, makes the saved redirect URI stale, so the client registration, tokens and PKCE verifier are discarded and a new authorization is required.
 - **Authorization times out after five minutes** — `authorizationTimeoutMs` defaults to 300000 ms; when the browser does not return in that window the attempt ends at Connection failed and Connect Notion starts a new one.
 - **Credentials are bound to the profile path and key** — the file path is authenticated data and the keyring entry is keyed by that path's digest, so moving the profile or changing `DSH_NOTION_ENCRYPTION_KEY` makes the file unreadable, and there is no plaintext fallback.
 - **Headless hosts need their own key** — without an unlocked operating-system credential store (on Linux, the Secret Service) every connection fails until `DSH_NOTION_ENCRYPTION_KEY` holds a persistent Base64 32-byte key; on Windows the mode and ownership checks are skipped, so the profile directory needs ACLs.
 - **Disconnect is local only** — it removes the encrypted file, the keyring entry and the registered tools, but the grant stays in the Notion account until it is revoked in Notion's connection settings.
-- **Every transport request carries the tool timeout** — `toolCallTimeoutMs` (60 seconds by default) also bounds a server-opened GET event stream, so a stream that should stay open longer is closed at that deadline; more than eight such opens in ten seconds makes the bridge drop to Connection failed.
+- **Each tool call carries the tool timeout** — `toolCallTimeoutMs` (60 seconds by default) bounds tool calls and discovery requests, but not a server-opened GET event stream, which stays open until the connection is closed; more than eight such opens in ten seconds makes the bridge drop to Connection failed.
 
 <a id="dev-note"></a>
 ### Dev Note

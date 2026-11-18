@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
+import { connect } from 'node:net'
 import { execFile } from 'node:child_process'
 import { chmod, link, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -12,6 +13,7 @@ import { limitResponse } from '../lib/response-limit.js'
 import { outputValidatorStats, validateOutput } from '../lib/output-validator.js'
 import { registerRoutes } from '../lib/routes.js'
 import { SessionStore, sessionFileFor } from '../lib/store.js'
+import { Config } from '../lib/config.js'
 
 process.env.DSH_NOTION_ENCRYPTION_KEY = Buffer.alloc(32, 29).toString('base64')
 
@@ -76,6 +78,24 @@ test('credentials are encrypted, profile-isolated, owner-only, and reject tamper
     await assert.rejects(new SessionStore(file).load(), /regular file/)
     assert.equal(await readFile(target, 'utf8'), 'do not modify')
   } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('an invalid encryption key is reported as invalid, not as unavailable storage', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'notion-key-'))
+  const previous = process.env.DSH_NOTION_ENCRYPTION_KEY
+  try {
+    const file = sessionFileFor('notion', 'https://example.test/mcp', join(root, 'cordis.patch.yml'))
+    process.env.DSH_NOTION_ENCRYPTION_KEY = 'not-a-key'
+    await assert.rejects(new SessionStore(file).patch({ codeVerifier: 'v' }), /must be standard Base64 for exactly 32 bytes/)
+    process.env.DSH_NOTION_ENCRYPTION_KEY = Buffer.alloc(16, 1).toString('base64')
+    await assert.rejects(new SessionStore(file).patch({ codeVerifier: 'v' }), /must be standard Base64 for exactly 32 bytes/)
+    assert.throws(() => Config({ toolCallTimeoutMs: 2 ** 31 }), /toolCallTimeoutMs/)
+    assert.throws(() => Config({ authorizationTimeoutMs: 2 ** 31 }), /authorizationTimeoutMs/)
+  } finally {
+    if (previous === undefined) delete process.env.DSH_NOTION_ENCRYPTION_KEY
+    else process.env.DSH_NOTION_ENCRYPTION_KEY = previous
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test('credential storage rejects substituted directories and hard-linked files', { skip: process.platform === 'win32' }, async () => {
@@ -148,6 +168,15 @@ test('web routes require the DSH connection fence for reading and changing state
     assert.equal((await fetch(origin + '/plugins/notion/connect', { method: 'POST' })).status, 200)
     assert.equal(calls, 1)
     assert.equal((await fetch(origin + '/plugins/notionary/status')).status, 404)
+    const raw = await new Promise((resolve, reject) => {
+      const socket = connect(server.address().port, '127.0.0.1', () => socket.write('GET http://[ HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n'))
+      let data = ''
+      socket.on('data', (chunk) => { data += chunk })
+      socket.on('end', () => resolve(data))
+      socket.on('error', reject)
+    })
+    assert.match(raw, /^HTTP\/1\.1 400/)
+    assert.equal(calls, 1)
   } finally { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)) }
 })
 

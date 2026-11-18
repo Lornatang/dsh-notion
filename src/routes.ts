@@ -17,17 +17,19 @@ function respond(res: ServerResponse, status: number, value: unknown): void {
 
 export function registerRoutes(web: RouteRegistrar, bridge: PluginBridge, fence: RequestFence | undefined): () => void {
   return web.register({ kind: 'prefix', path: ROUTE_PREFIX, handler: async (req, res) => {
-    if (!fence) { respond(res, 503, { ok: false, error: 'DSH connection service is unavailable' }); return }
-    const rejection = fence.requestRejection(req)
-    if (rejection !== undefined) { res.writeHead(rejection).end(); return }
-    const path = new URL(req.url ?? '/', 'http://localhost').pathname
     try {
+      if (!fence) { respond(res, 503, { ok: false, error: 'DSH connection service is unavailable' }); return }
+      const rejection = fence.requestRejection(req)
+      if (rejection !== undefined) { res.writeHead(rejection).end(); return }
+      let path: string
+      try { path = new URL(req.url ?? '/', 'http://localhost').pathname } catch { respond(res, 400, { ok: false, error: 'invalid request target' }); return }
       if (req.method === 'GET' && path === `${ROUTE_PREFIX}/status`) { respond(res, 200, { ...bridge.snapshot(), ok: true }); return }
       if (req.method === 'POST' && path === `${ROUTE_PREFIX}/connect`) { respond(res, 200, { ...await bridge.authorize(), ok: true }); return }
       if (req.method === 'POST' && path === `${ROUTE_PREFIX}/disconnect`) { respond(res, 200, { ...await bridge.disconnect(), ok: true }); return }
       respond(res, 404, { ok: false, error: 'unknown endpoint' })
-    } catch (error) {
-      respond(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
+    } catch {
+      // Never echo upstream error text here: it can carry OAuth response bodies.
+      respond(res, 500, { ok: false, error: 'Notion operation failed; check the connection status' })
     }
   } })
 }
