@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.11 - 2026-11-19
+
+- Close the OAuth listener when plugin disposal overlaps a failed disconnect.
+- Account for SSE lines and split CRLF delimiters in one linear pass.
+
 ## 0.1.10 - 2026-11-19
 
 - Assign stable ids to output schemas so warm validation workers skip re-sending and re-cloning an unchanged schema, and recycle a worker when its validator cache fills instead of forgetting compiled schemas.
