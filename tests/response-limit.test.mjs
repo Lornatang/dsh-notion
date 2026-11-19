@@ -3,8 +3,7 @@ import { test } from 'node:test'
 import { limitResponse } from '../lib/response-limit.js'
 
 // Byte-by-byte reference of the SSE accounting, including comment lines as
-// events. The production limiter skips runs of ordinary bytes with native
-// scans; both implementations must agree on limits, event counts and output.
+// events. Compare limits, event counts and output with the production scanner.
 function referenceLimit(chunks, maxBytes) {
   let size = 0
   let lineSize = 0
@@ -94,16 +93,25 @@ test('comment lines count as SSE events without consuming the byte budget', asyn
   assert.equal(huge.events, 0)
 })
 
-test('data events still hit the per-event byte limit at exact boundaries', async () => {
-  const over = await actualLimit(chunksOf('data: ok\n\n'), 8)
-  assert.equal(over.limited, true)
-  assert.equal(over.events, 0)
-  assert.equal(over.limits, 1)
-  const crlfOver = await actualLimit(chunksOf('data: ok\r\n\r\n'), 10)
-  assert.equal(crlfOver.limited, true)
-  const crlfExact = await actualLimit(chunksOf('data: ok\r\n\r\n'), 11)
-  assert.equal(crlfExact.limited, false)
-  assert.equal(crlfExact.events, 1)
+test('counts decoded bytes at exact SSE boundaries, including split CRLF', async () => {
+  const cases = [
+    { chunks: ['data: ok\n', '\n'], exact: 10, events: 1 },
+    { chunks: ['data: ok\r', '', '\n\r', '\n'], exact: 11, events: 1 },
+    { chunks: ['data: ok\r', '\r'], exact: 10, events: 1 },
+    { chunks: ['data: 字😀\r', '\n\r', '\n'], exact: 16, events: 1 },
+    { chunks: ['data: a\r\n', ': b\r', '\n\r', '\n'], exact: 13, events: 2 },
+  ]
+  for (const { chunks, exact, events } of cases) {
+    const bytes = chunks.map((chunk) => encoder.encode(chunk))
+    const accepted = await actualLimit(bytes, exact)
+    assert.equal(accepted.limited, false, JSON.stringify(chunks))
+    assert.equal(accepted.events, events)
+    assert.deepEqual(accepted.out, Buffer.concat(bytes))
+    const rejected = await actualLimit(bytes, exact - 1)
+    assert.equal(rejected.limited, true, JSON.stringify(chunks))
+    assert.equal(rejected.limits, 1)
+    assert.equal(rejected.events, 0)
+  }
 })
 
 test('non-SSE responses keep the total byte limit', async () => {
@@ -114,11 +122,11 @@ test('non-SSE responses keep the total byte limit', async () => {
   assert.equal(under.limited, false)
 })
 
-test('fast-path SSE limiting matches the byte-by-byte reference on random streams', async () => {
+test('SSE limiting matches the byte-by-byte reference on random streams', async () => {
   let seed = 42
-  const rand = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648 }
+  const rand = () => { seed = (Math.imul(seed, 1103515245) + 12345) >>> 0; return seed / 4294967296 }
   const pick = (items) => items[Math.floor(rand() * items.length)]
-  const tokens = ['data: hello', 'data: {"a":1}', ': keepalive', ':', 'event: x', 'id: 7', 'retry: 100', 'a', '\r', '\n', '\r\n', ' ', 'x'.repeat(50), 'data: ' + 'y'.repeat(120)]
+  const tokens = ['data: hello', 'data: {"a":1}', ': keepalive', ':', 'event: x', 'id: 7', 'retry: 100', 'a', '字😀', '\r', '\n', '\r\n', ' ', 'x'.repeat(50), 'data: ' + 'y'.repeat(120)]
   const budgets = [8, 16, 32, 128, 1024, 100000]
   for (let iteration = 0; iteration < 400; iteration++) {
     let text = ''

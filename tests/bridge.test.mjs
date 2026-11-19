@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { test } from 'node:test'
 import { NotionBridge } from '../lib/bridge.js'
+import { CallbackServer } from '../lib/oauth.js'
 import { SessionStore } from '../lib/store.js'
 import { startMockMcp } from './mock-mcp.mjs'
 
@@ -224,6 +225,47 @@ test('disconnect during startup cannot restore credentials or tools afterward', 
     assert.equal(host.tools.size, 0)
     await assert.rejects(stat(file), { code: 'ENOENT' })
   } finally { await bridge.dispose(); await mock.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('dispose closes the OAuth listener even when an in-flight disconnect fails', async (t) => {
+  const mock = await startMockMcp()
+  const root = await mkdtemp(join(tmpdir(), 'notion-failed-disconnect-'))
+  const file = join(root, 'session.json')
+  const config = options(mock, file)
+  const failure = new Error('credential store unavailable')
+  const { promise: destroyStarted, resolve: startDestroy } = Promise.withResolvers()
+  const { promise: destroyMayFinish, resolve: finishDestroy } = Promise.withResolvers()
+  t.mock.method(config.store, 'destroy', async () => {
+    startDestroy()
+    await destroyMayFinish
+    throw failure
+  })
+  // Keep a cleanup handle so this test can finish even if the listener leaks.
+  let callback
+  const listen = CallbackServer.prototype.listen
+  t.mock.method(CallbackServer.prototype, 'listen', function (port) {
+    callback = this
+    return listen.call(this, port)
+  })
+  const bridge = new NotionBridge(makeHost(), config)
+  try {
+    await bridge.start()
+    const uri = config.store.current.redirectUri
+    const saved = await readFile(file, 'utf8')
+    const disconnected = assert.rejects(bridge.disconnect(), (error) => error === failure)
+    await destroyStarted
+    const disposed = assert.rejects(bridge.dispose(), (error) => error === failure)
+    finishDestroy()
+    await Promise.all([disconnected, disposed])
+    await assert.rejects(fetch(uri), (error) => error.cause?.code === 'ECONNREFUSED')
+    assert.equal(await readFile(file, 'utf8'), saved)
+  } finally {
+    finishDestroy()
+    await bridge.dispose()
+    await callback?.close()
+    await mock.close()
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test('conflicting resource tool names fail without leaving partial tools registered', async () => {

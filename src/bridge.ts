@@ -423,15 +423,7 @@ export class NotionBridge {
     return this.snapshot()
   }
   async #disconnectNow(): Promise<void> {
-    this.#generation++
-    this.#setStatus('idle')
-    this.#controller.abort()
-    this.#callback.cancelWait()
-    await this.#boot?.catch(() => undefined)
-    this.#callback.cancelWait()
-    await this.#work
-    await this.#closeClient()
-    this.#clearTools()
+    await this.#stopConnection()
     try { await this.#options.store.destroy() }
     finally {
       this.#initialized = false
@@ -443,7 +435,13 @@ export class NotionBridge {
   async dispose(): Promise<void> {
     if (this.#disposed) return
     this.#disposed = true
-    await this.#disconnect
+    try { await this.#disconnect }
+    finally {
+      try { await this.#stopConnection() }
+      finally { await this.#callback.close() }
+    }
+  }
+  async #stopConnection(): Promise<void> {
     this.#generation++
     this.#setStatus('idle')
     this.#controller.abort()
@@ -453,7 +451,6 @@ export class NotionBridge {
     await this.#work
     await this.#closeClient()
     this.#clearTools()
-    await this.#callback.close()
   }
   async #closeClient(): Promise<void> {
     const client = this.#client

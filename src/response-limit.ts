@@ -5,7 +5,7 @@ type LimitExceeded = () => void
 
 function limitStream(body: ReadableStream<Uint8Array>, maxBytes: number, events: boolean, onLimit: LimitExceeded, onEvent?: () => void): ReadableStream<Uint8Array> {
   let size = 0
-  let lineSize = 0
+  let lineHasBytes = false
   let lineStartSize = 0
   let comment = false
   let previousCR = false
@@ -29,38 +29,30 @@ function limitStream(body: ReadableStream<Uint8Array>, maxBytes: number, events:
             continue
           }
           if (byte !== 13 && byte !== 10) {
-            // Fast path: skip whole runs of ordinary bytes with native scans
-            // instead of a per-byte loop, preserving the exact accounting.
-            let next = chunk.indexOf(13, index + 1)
-            const lf = chunk.indexOf(10, index + 1)
-            if (lf !== -1 && (next === -1 || lf < next)) next = lf
-            const end = next === -1 ? chunk.length : next
-            const run = end - index
-            if (lineSize === 0) comment = byte === 58
-            lineSize += run
-            size += run
+            // Scan both line endings in one pass and stop at the first byte
+            // that could exceed the budget.
+            const start = index++
+            const end = Math.min(chunk.length, start + Math.floor(maxBytes - size) + 1)
+            while (index < end) {
+              const next = chunk[index]!
+              if (next === 13 || next === 10) break
+              index++
+            }
+            if (!lineHasBytes) comment = byte === 58
+            lineHasBytes = true
+            size += index - start
             if (size > maxBytes) { onLimit(); throw new Error('notion: MCP response exceeds the byte limit') }
             previousCR = false
-            index = end
             continue
           }
           if (++size > maxBytes) { onLimit(); throw new Error('notion: MCP response exceeds the byte limit') }
-          if (byte === 13) {
-            discardFollowingLF = lineSize === 0 || comment
-            if (lineSize === 0) { onEvent?.(); size = 0 }
-            else if (comment) { size = lineStartSize; onEvent?.() }
-            lineSize = 0
-            comment = false
-            lineStartSize = size
-            previousCR = true
-          } else {
-            if (lineSize === 0) { onEvent?.(); size = 0 }
-            else if (comment) { size = lineStartSize; onEvent?.() }
-            lineSize = 0
-            comment = false
-            lineStartSize = size
-            previousCR = false
-          }
+          discardFollowingLF = !lineHasBytes || comment
+          if (!lineHasBytes) { onEvent?.(); size = 0 }
+          else if (comment) { size = lineStartSize; onEvent?.() }
+          lineHasBytes = false
+          comment = false
+          lineStartSize = size
+          previousCR = byte === 13
           index++
         }
       } else {
